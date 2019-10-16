@@ -2,7 +2,12 @@
 node_modules
 npm-debug.log*
 build/
+build-turbo/
 TODO.md
 package-lock.json
 *.log
+.vscode
+/assets/graphiql.html
+/src/assets/favicon.ico.ts
+/src/assets/graphiql.html.ts
 .vscode

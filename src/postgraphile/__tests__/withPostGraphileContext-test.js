@@ -2,6 +2,7 @@
 
 import { $$pgClient } from '../../postgres/inventory/pgClientFromContext';
 import withPostGraphileContext from '../withPostGraphileContext';
+import { readFileSync } from 'fs';
 
 const jwt = require('jsonwebtoken');
 
@@ -67,6 +68,18 @@ test('will throw an error if there was a `jwtToken`, but no `jwtSecret`', async 
   const pgPool = { connect: jest.fn(() => pgClient) };
   await expectHttpError(
     withPostGraphileContext({ pgPool, jwtToken: 'asd' }, () => {}),
+    403,
+    'Not allowed to provide a JWT token.',
+  );
+  // Never set up the transaction due to error
+  expect(pgClient.query.mock.calls).toEqual([]);
+});
+
+test('will throw an error if there was a `jwtToken`, but `jwtSecret` had unsupported format', async () => {
+  const pgClient = { query: jest.fn(), release: jest.fn() };
+  const pgPool = { connect: jest.fn(() => pgClient) };
+  await expectHttpError(
+    withPostGraphileContext({ pgPool, jwtToken: 'asd', jwtSecret: true }, () => {}),
     403,
     'Not allowed to provide a JWT token.',
   );
@@ -159,6 +172,32 @@ test('will succeed with all the correct things', async () => {
         noTimestamp: true,
       }),
       jwtSecret: 'secret',
+    },
+    () => {},
+  );
+  expect(pgClient.query.mock.calls).toEqual([
+    ['begin'],
+    [
+      {
+        text: 'select set_config($1, $2, true)',
+        values: ['jwt.claims.aud', 'postgraphile'],
+      },
+    ],
+    ['commit'],
+  ]);
+});
+
+test('will succeed with jwt and buffer as secret ', async () => {
+  const pgClient = { query: jest.fn(), release: jest.fn() };
+  const pgPool = { connect: jest.fn(() => pgClient) };
+  const bufferSecret = Buffer.from('secret', 'utf8');
+  await withPostGraphileContext(
+    {
+      pgPool,
+      jwtToken: jwt.sign({ aud: 'postgraphile' }, bufferSecret, {
+        noTimestamp: true,
+      }),
+      jwtSecret: bufferSecret,
     },
     () => {},
   );
@@ -525,7 +564,7 @@ test('will set a role provided in the JWT superceding the default role', async (
   ]);
 });
 
-test('will set a role provided in the JWT', async () => {
+test('will set a role provided in the JWT (deep role)', async () => {
   const pgClient = { query: jest.fn(), release: jest.fn() };
   const pgPool = { connect: jest.fn(() => pgClient) };
   await withPostGraphileContext(
@@ -626,7 +665,7 @@ test('if same settings are set by pgSettings and JWT, JWT will "win", except for
   ]);
 });
 
-test('will set a role provided in the JWT superceding the default role', async () => {
+test('will set a role provided in the JWT superceding the default role (deep role)', async () => {
   const pgClient = { query: jest.fn(), release: jest.fn() };
   const pgPool = { connect: jest.fn(() => pgClient) };
   await withPostGraphileContext(
@@ -913,6 +952,108 @@ describe('jwtVerifyOptions', () => {
       'jwt audience invalid. expected: postgraphile',
     );
     // No need for transaction since there's no settings
+    expect(pgClient.query.mock.calls).toEqual([]);
+  });
+
+  test('will succeed using jwtPublicKey instead of jwtSecret if both options are provided', async () => {
+    await withPostGraphileContext(
+      {
+        pgPool,
+        jwtToken: jwt.sign({ aud: 'postgraphile' }, 'public key', {
+          noTimestamp: true,
+        }),
+        jwtSecret: 'secret',
+        jwtPublicKey: 'public key',
+      },
+      () => {},
+    );
+    expect(pgClient.query.mock.calls).toEqual([
+      ['begin'],
+      [
+        {
+          text: 'select set_config($1, $2, true)',
+          values: ['jwt.claims.aud', 'postgraphile'],
+        },
+      ],
+      ['commit'],
+    ]);
+  });
+
+  test('will succeed with asymmetric encryption verification', async () => {
+    const privateKey = readFileSync(`${__dirname}/assets/private-key.pem`);
+    const publicKey = readFileSync(`${__dirname}/assets/public-key.pem`);
+    await withPostGraphileContext(
+      {
+        pgPool,
+        jwtToken: jwt.sign({ aud: 'postgraphile' }, privateKey, {
+          noTimestamp: true,
+          algorithm: 'RS256',
+        }),
+        jwtPublicKey: publicKey,
+        jwtVerifyOptions: {
+          algorithms: ['RS256'],
+        },
+      },
+      () => {},
+    );
+    expect(pgClient.query.mock.calls).toEqual([
+      ['begin'],
+      [
+        {
+          text: 'select set_config($1, $2, true)',
+          values: ['jwt.claims.aud', 'postgraphile'],
+        },
+      ],
+      ['commit'],
+    ]);
+  });
+
+  test('will throw an error on invalid public key on asymmetric encryption verification', async () => {
+    const privateKey = readFileSync(`${__dirname}/assets/private-key.pem`);
+    const publicKey = readFileSync(`${__dirname}/assets/public-key.pem`);
+    publicKey.write('ASDF', 100); // Make the key invalid while keeping correct format
+    await expectHttpError(
+      withPostGraphileContext(
+        {
+          pgPool,
+          jwtToken: jwt.sign({ aud: 'postgraphile' }, privateKey, {
+            noTimestamp: true,
+            algorithm: 'RS256',
+          }),
+          jwtPublicKey: publicKey,
+          jwtVerifyOptions: {
+            algorithms: ['RS256'],
+          },
+        },
+        () => {},
+      ),
+      403,
+      'invalid signature',
+    );
+    expect(pgClient.query.mock.calls).toEqual([]);
+  });
+
+  test('will throw an error on unsupported algorithms on asymmetric encryption verification', async () => {
+    const privateKey = readFileSync(`${__dirname}/assets/private-key.pem`);
+    const publicKey = readFileSync(`${__dirname}/assets/public-key.pem`);
+    await expectHttpError(
+      withPostGraphileContext(
+        {
+          pgPool,
+          jwtToken: jwt.sign({ aud: 'postgraphile' }, privateKey, {
+            noTimestamp: true,
+            algorithm: 'RS256',
+          }),
+          jwtPublicKey: publicKey,
+          jwtVerifyOptions: {
+            algorithms: ['RS512'],
+          },
+        },
+        () => {},
+      ),
+      403,
+      'invalid algorithm',
+    );
     expect(pgClient.query.mock.calls).toEqual([]);
   });
 });

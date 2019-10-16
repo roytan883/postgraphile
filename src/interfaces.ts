@@ -1,10 +1,11 @@
 /* tslint:disable:no-any */
-import { GraphQLError, GraphQLSchema, SourceLocation } from 'graphql';
+import { GraphQLError, GraphQLSchema, SourceLocation, DocumentNode } from 'graphql';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PluginHookFn } from './postgraphile/pluginHook';
 import { Pool } from 'pg';
-import { Plugin } from 'postgraphile-core';
+import { Plugin, PostGraphileCoreOptions } from 'postgraphile-core';
 import jwt = require('jsonwebtoken');
+import { EventEmitter } from 'events';
 
 /**
  * A narrower type than `any` that won’t swallow errors from assumptions about
@@ -25,15 +26,24 @@ import jwt = require('jsonwebtoken');
  */
 export type mixed = {} | string | number | boolean | undefined | null;
 
+export type Middleware = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  next: (err?: Error) => void,
+) => void;
+
 // Please note that the comments for this type are turned into documentation
 // automatically. We try and specify the options in the same order as the CLI.
 // Anything tagged `@middlewareOnly` will not appear in the schema-only docs.
 // Only comments written beginning with `//` will be put in the docs.
-export interface PostGraphileOptions {
+export interface PostGraphileOptions<
+  Request extends IncomingMessage = IncomingMessage,
+  Response extends ServerResponse = ServerResponse
+> extends PostGraphileCoreOptions {
   // When true, PostGraphile will update the GraphQL API whenever your database
   // schema changes. This feature requires some changes to your database in the
   // form of the
-  // [`postgraphile_watch`](https://github.com/graphile/graphile-build/blob/master/packages/graphile-build-pg/res/watch-fixtures.sql)
+  // [`postgraphile_watch`](https://github.com/graphile/graphile-engine/blob/master/packages/graphile-build-pg/res/watch-fixtures.sql)
   // schema; PostGraphile will try to add this itself but requires DB superuser
   // privileges to do so. If PostGraphile can't install it, you can do so
   // manually. PostGraphile will not drop the schema when it exits, to remove
@@ -42,6 +52,27 @@ export interface PostGraphileOptions {
   //   `DROP SCHEMA postgraphile_watch CASCADE;`
   /* @middlewareOnly */
   watchPg?: boolean;
+  // When false (default), PostGraphile will exit if it fails to build the
+  // initial schema (for example if it cannot connect to the database, or if
+  // there are fatal naming conflicts in the schema). When true, PostGraphile
+  // will keep trying to rebuild the schema indefinitely, using an exponential
+  // backoff between attempts, starting at 100ms and increasing up to 30s delay
+  // between retries.
+  /* @middlewareOnly */
+  retryOnInitFail?: boolean;
+  // Connection string to use to connect to the database as a privileged user (e.g. for setting up watch fixtures, logical decoding, etc).
+  ownerConnectionString?: string;
+  // Enable GraphQL websocket transport support for subscriptions (you still need a subscriptions plugin currently)
+  subscriptions?: boolean;
+  // [EXPERIMENTAL] Enables live-query support via GraphQL subscriptions (sends updated payload any time nested collections/records change)
+  live?: boolean;
+  // [EXPERIMENTAL] If you're using websockets (subscriptions || live) then you
+  // may want to authenticate your users using sessions or similar. You can
+  // pass some simple middlewares here that will be executed against the
+  // websocket connection in order to perform authentication. We current only
+  // support express (not Koa) middlewares here.
+  /* @middlewareOnly */
+  websocketMiddlewares?: Array<Middleware>;
   // The default Postgres role to use. If no role was provided in a provided
   // JWT token, this role will be used.
   pgDefaultRole?: string;
@@ -50,7 +81,7 @@ export interface PostGraphileOptions {
   // JSON input and output, saving the need to parse / stringify JSON manually.
   dynamicJson?: boolean;
   // If none of your `RETURNS SETOF compound_type` functions mix NULLs with the
-  // results then you may set this true to reduce the nullables in the GraphQL
+  // results then you may set this false to reduce the nullables in the GraphQL
   // schema.
   setofFunctionsContainNulls?: boolean;
   // Enables classic ids for Relay support. Instead of using the field name
@@ -62,12 +93,18 @@ export interface PostGraphileOptions {
   // types & fields. Database mutation will only be possible through Postgres
   // functions.
   disableDefaultMutations?: boolean;
-  // Set false (recommended) to exclude fields, queries and mutations that the
-  // user isn't permitted to access from the generated GraphQL schema; set this
-  // option true to skip these checks and create GraphQL fields and types for
-  // everything.
+  // Set false (recommended) to exclude fields, queries and mutations that are
+  // not available to any possible user (determined from the user in connection
+  // string and any role they can become); set this option true to skip these
+  // checks and create GraphQL fields and types for everything.
   // The default is `true`, in v5 the default will change to `false`.
   ignoreRBAC?: boolean;
+  // Set false (recommended) to exclude filters, orderBy, and relations that
+  // would be expensive to access due to missing indexes. Changing this from
+  // true to false is a breaking change, but false to true is not, so we
+  // recommend you start with it set to `false`.
+  // The default is `true`, in v5 the default may change to `false`.
+  ignoreIndexes?: boolean;
   // By default, tables and functions that come from extensions are excluded
   // from the generated GraphQL schema as general applications don't need them
   // to be exposed to the end user. You can use this flag to include them in
@@ -88,21 +125,21 @@ export interface PostGraphileOptions {
   // `showErrorStack` and `extendedError` may have no
   // effect.
   /* @middlewareOnly */
-  handleErrors?: ((
-    errors: Array<GraphQLError>,
-    req: IncomingMessage,
-    res: ServerResponse,
-  ) => Array<GraphQLErrorExtended>);
-  // An array of [Graphile Build](/graphile-build/plugins/) plugins to load
+  handleErrors?: (
+    errors: ReadonlyArray<GraphQLError>,
+    req: Request,
+    res: Response,
+  ) => Array<GraphQLErrorExtended>;
+  // An array of [Graphile Engine](/graphile-build/plugins/) schema plugins to load
   // after the default plugins.
   appendPlugins?: Array<Plugin>;
-  // An array of [Graphile Build](/graphile-build/plugins/) plugins to load
+  // An array of [Graphile Engine](/graphile-build/plugins/) schema plugins to load
   // before the default plugins (you probably don't want this).
   prependPlugins?: Array<Plugin>;
-  // The full array of [Graphile Build](/graphile-build/plugins/) plugins to
+  // The full array of [Graphile Engine](/graphile-build/plugins/) schema plugins to
   // use for schema generation (you almost definitely don't want this!).
   replaceAllPlugins?: Array<Plugin>;
-  // An array of [Graphile Build](/graphile-build/plugins/) plugins to skip.
+  // An array of [Graphile Engine](/graphile-build/plugins/) schema plugins to skip.
   skipPlugins?: Array<Plugin>;
   // A file path string. Reads cached values from local cache file to improve
   // startup time (you may want to do this in production).
@@ -120,6 +157,10 @@ export interface PostGraphileOptions {
   // be overwritten.
   /* @middlewareOnly */
   exportGqlSchemaPath?: string;
+  // If true, lexicographically (alphabetically) sort exported schema for
+  // more stable diffing.
+  /* @middlewareOnly */
+  sortExport?: boolean;
   // The endpoint the GraphQL executer will listen on. Defaults to `/graphql`.
   /* @middlewareOnly */
   graphqlRoute?: string;
@@ -128,9 +169,24 @@ export interface PostGraphileOptions {
   // `true`). Defaults to `/graphiql`.
   /* @middlewareOnly */
   graphiqlRoute?: string;
+  // If you are using watch mode, or have enabled GraphiQL, and you either
+  // mount PostGraphile under a path, or use PostGraphile behind some kind of
+  // proxy that puts PostGraphile under a subpath (or both!) then you must
+  // specify this setting so that PostGraphile can figure out it's external
+  // URL.
+  // (e.g. if you do `app.use('/path/to', postgraphile(...))`), which is not
+  // officially supported, then you should pass `externalUrlBase: '/path/to'`.)
+  // This setting should never end in a slash (`/`). To specify that the
+  // external URL is the expected one, either omit this setting or set it to the
+  // empty string `''`.
+  /* @middlewareOnly */
+  externalUrlBase?: string;
   // Set this to `true` to enable the GraphiQL interface.
   /* @middlewareOnly */
   graphiql?: boolean;
+  // Set this to `true` to add some enhancements to GraphiQL; intended for development usage only (automatically enables with `subscriptions` and `live`).
+  /* @middlewareOnly */
+  enhanceGraphiql?: boolean;
   // Enables some generous CORS settings for the GraphQL endpoint. There are
   // some costs associated when enabling this, if at all possible try to put
   // your API behind a reverse proxy.
@@ -142,9 +198,9 @@ export interface PostGraphileOptions {
   /* @middlewareOnly */
   bodySizeLimit?: string;
   // [Experimental] Enable the middleware to process multiple GraphQL queries
-  // in one request
+  // in one request.
   /* @middlewareOnly */
-  enableQueryBatching?: string;
+  enableQueryBatching?: boolean;
   // The secret for your JSON web tokens. This will be used to verify tokens in
   // the `Authorization` header, and signing JWT tokens you return in
   // procedures.
@@ -156,9 +212,10 @@ export interface PostGraphileOptions {
   // null.
   /* @middlewareOnly */
   jwtVerifyOptions?: jwt.VerifyOptions;
-  // A comma separated list of strings that give a path in the jwt from which
-  // to extract the postgres role. If none is provided it will use the key
-  // `role` on the root of the jwt.
+  // An array of (strings) path components that make up the path in the jwt from which to extract the postgres role.
+  // By default, the role is extracted from `token.role`, so the default value is `['role']`.
+  // e.g. `{ iat: 123456789, creds: { local: { role: "my_role" } } }`
+  // the path would be `token.creds.local.role` i.e. `['creds', 'local', 'role']`
   /* @middlewareOnly */
   jwtRole?: Array<string>;
   // The Postgres type identifier for the compound type which will be signed as
@@ -184,19 +241,19 @@ export interface PostGraphileOptions {
   /* @middlewareOnly */
   disableQueryLog?: boolean;
   // A plain object specifying custom config values to set in the PostgreSQL
-  // transaction (accessed via `current_setting('my.custom.setting')`) or a
-  // function which will return the same (or a Promise to the same) based on
-  // the incoming web request (e.g. to extract session data)
+  // transaction (accessed via `current_setting('my.custom.setting')`) **or**
+  // an (optionally asynchronous) function which will return the same (or a
+  // Promise to the same) based on the incoming web request (e.g. to extract
+  // session data).
   /* @middlewareOnly */
-  pgSettings?:
-    | { [key: string]: mixed }
-    | ((req: IncomingMessage) => Promise<{ [key: string]: mixed }>);
-  // Some graphile-build plugins may need additional information available on
-  // the `context` argument to the resolver - you can use this function to
-  // provide such information based on the incoming request - you can even use
-  // this to change the response [experimental], e.g. setting cookies
+  pgSettings?: { [key: string]: mixed } | ((req: Request) => Promise<{ [key: string]: mixed }>);
+  // Some Graphile Engine schema plugins may need additional information
+  // available on the `context` argument to the resolver - you can use this
+  // function to provide such information based on the incoming request - you
+  // can even use this to change the response [experimental], e.g. setting
+  // cookies.
   /* @middlewareOnly */
-  additionalGraphQLContextFromRequest?: (req: IncomingMessage, res: ServerResponse) => Promise<{}>;
+  additionalGraphQLContextFromRequest?: (req: Request, res: Response) => Promise<{}>;
   // [experimental] Plugin hook function, enables functionality within
   // PostGraphile to be expanded with plugins. Generate with
   // `makePluginHook(plugins)` passing a list of plugin objects.
@@ -205,42 +262,85 @@ export interface PostGraphileOptions {
   // Should we use relay pagination, or simple collections?
   // "omit" (default) - relay connections only,
   // "only" (not recommended) - simple collections only (no Relay connections),
-  // "both" - both
+  // "both" - both.
   simpleCollections?: 'omit' | 'both' | 'only';
-  // Max query cache size in MBs of queries. Default, 50MB
+  // Max query cache size in bytes (extremely approximate, not
+  // accurate at all). Default `50000000` (~50MB). Set to 0 to
+  // disable.
   /* @middlewareOnly */
   queryCacheMaxSize?: number;
-  // allow arbitrary extensions for consumption by plugins
-  [propName: string]: any;
+}
+
+export interface CreateRequestHandlerOptions extends PostGraphileOptions {
+  // The actual GraphQL schema we will use.
+  getGqlSchema: () => Promise<GraphQLSchema>;
+  // A Postgres client pool we use to connect Postgres clients.
+  pgPool: Pool;
+  _emitter: EventEmitter;
 }
 
 export interface GraphQLFormattedErrorExtended {
-  // This is ugly, really I just want `string | void` but apparently TypeScript doesn't support that.
-  [s: string]: ReadonlyArray<SourceLocation> | ReadonlyArray<string | number> | string | void;
   message: string;
   locations: ReadonlyArray<SourceLocation> | void;
   path: ReadonlyArray<string | number> | void;
+  extensions?: {
+    [s: string]: any;
+  };
 }
 
 export type GraphQLErrorExtended = GraphQLError & {
-  hint: string;
-  detail: string;
-  code: string;
+  extensions: {
+    exception: {
+      hint: string;
+      detail: string;
+      code: string;
+    };
+  };
 };
 
 /**
  * A request handler for one of many different `http` frameworks.
  */
-export interface HttpRequestHandler {
-  (req: IncomingMessage, res: ServerResponse, next?: (error?: mixed) => void): Promise<void>;
-  (ctx: { req: IncomingMessage; res: ServerResponse }, next: () => void): Promise<void>;
+export interface HttpRequestHandler<
+  Request extends IncomingMessage = IncomingMessage,
+  Response extends ServerResponse = ServerResponse
+> {
+  (req: Request, res: Response, next?: (error?: mixed) => void): Promise<void>;
+  (ctx: { req: Request; res: Response }, next: () => void): Promise<void>;
   formatError: (e: GraphQLError) => GraphQLFormattedErrorExtended;
   getGraphQLSchema: () => Promise<GraphQLSchema>;
   pgPool: Pool;
   withPostGraphileContextFromReqRes: (
-    req: IncomingMessage,
-    res: ServerResponse,
+    req: Request,
+    res: Response,
     moreOptions: any,
     fn: (ctx: mixed) => any,
   ) => Promise<any>;
+  options: CreateRequestHandlerOptions;
+  handleErrors: (
+    errors: ReadonlyArray<GraphQLError>,
+    req: Request,
+    res: Response,
+  ) => Array<GraphQLErrorExtended>;
+}
+
+/**
+ * Options passed to the `withPostGraphileContext` function
+ */
+export interface WithPostGraphileContextOptions {
+  pgPool: Pool;
+  jwtToken?: string;
+  jwtSecret?: string;
+  jwtPublicKey?: string;
+  jwtAudiences?: Array<string>;
+  jwtRole?: Array<string>;
+  jwtVerifyOptions?: jwt.VerifyOptions;
+  pgDefaultRole?: string;
+  pgSettings?: { [key: string]: mixed };
+  queryDocumentAst?: DocumentNode;
+  operationName?: string;
+  pgForceTransaction?: boolean;
+  singleStatement?: boolean;
+  // tslint:disable-next-line no-any
+  variables?: any;
 }

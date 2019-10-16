@@ -2,7 +2,7 @@ language: node_js
 
 node_js:
   - "8"
-  - "9"
+  - "10"
 
 addons:
   postgresql: "9.4"
@@ -10,11 +10,7 @@ addons:
 env:
   TEST_PG_URL: postgres://localhost:5432/travis
 
-cache:
-  yarn: true
-  directories:
-    - node_modules
-    - $NVM_DIR
+cache: yarn
 
 script:
   - scripts/ci

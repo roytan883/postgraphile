@@ -18,15 +18,13 @@
     "noFallthroughCasesInSwitch": true,
     "noUnusedParameters": true,
     "noUnusedLocals": true,
-    "lib": [
-      "es2017",
-      "esnext.asynciterable"
-    ]
+    "lib": ["es2017", "esnext.asynciterable"]
   },
   "exclude": [
     "index.js",
     "node_modules",
     "build",
+    "build-turbo",
     "examples",
     "utils",
     "resources",

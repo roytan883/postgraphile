@@ -1,49 +1,77 @@
 import createDebugger = require('debug');
 import jwt = require('jsonwebtoken');
-import { Pool, PoolClient } from 'pg';
-import { ExecutionResult, DocumentNode, OperationDefinitionNode, Kind } from 'graphql';
+import { Pool, PoolClient, QueryConfig, QueryResult } from 'pg';
+import { ExecutionResult, OperationDefinitionNode, Kind } from 'graphql';
 import * as sql from 'pg-sql2';
 import { $$pgClient } from '../postgres/inventory/pgClientFromContext';
 import { pluginHookFromOptions } from './pluginHook';
-import { mixed } from '../interfaces';
+import { mixed, WithPostGraphileContextOptions } from '../interfaces';
+import { formatSQLForDebugging } from 'postgraphile-core';
 
-const undefinedIfEmpty = (o?: Array<string> | string): undefined | Array<string> | string =>
-  o && o.length ? o : undefined;
+const undefinedIfEmpty = (
+  o?: Array<string | RegExp> | string | RegExp,
+): undefined | Array<string | RegExp> | string | RegExp =>
+  o && (!Array.isArray(o) || o.length) ? o : undefined;
 
-export type WithPostGraphileContextFn = (
-  options: {
-    pgPool: Pool;
-    jwtToken?: string;
-    jwtSecret?: string;
-    jwtAudiences?: Array<string>;
-    jwtRole: Array<string>;
-    jwtVerifyOptions?: jwt.VerifyOptions;
-    pgDefaultRole?: string;
-    pgSettings?: { [key: string]: mixed };
-  },
-  callback: (context: mixed) => Promise<ExecutionResult>,
-) => Promise<ExecutionResult>;
+interface PostGraphileContext {
+  [$$pgClient]: PoolClient;
+  [key: string]: PoolClient | mixed;
+}
+
+export type WithPostGraphileContextFn<TResult = ExecutionResult> = (
+  options: WithPostGraphileContextOptions,
+  callback: (context: PostGraphileContext) => Promise<TResult>,
+) => Promise<TResult>;
+
+const debugPg = createDebugger('postgraphile:postgres');
+const debugPgError = createDebugger('postgraphile:postgres:error');
+const debugPgNotice = createDebugger('postgraphile:postgres:notice');
+
+/**
+ * Formats an error/notice from `pg` and feeds it into a `debug` function.
+ */
+function debugPgErrorObject(debugFn: createDebugger.IDebugger, object: PgNotice) {
+  debugFn(
+    '%s%s: %s%s%s',
+    object.severity || 'ERROR',
+    object.code ? `[${object.code}]` : '',
+    object.message || object,
+    object.where ? ` | WHERE: ${object.where}` : '',
+    object.hint ? ` | HINT: ${object.hint}` : '',
+  );
+}
+
+type WithAuthenticatedPgClientFunction = <T>(
+  cb: (pgClient: PoolClient) => Promise<T>,
+) => Promise<T>;
+
+const simpleWithPgClientCache = new WeakMap<Pool, WithAuthenticatedPgClientFunction>();
+function simpleWithPgClient(pgPool: Pool) {
+  const cached = simpleWithPgClientCache.get(pgPool);
+  if (cached) {
+    return cached;
+  }
+  const func: WithAuthenticatedPgClientFunction = async cb => {
+    const pgClient = await pgPool.connect();
+    try {
+      return await cb(pgClient);
+    } finally {
+      pgClient.release();
+    }
+  };
+  simpleWithPgClientCache.set(pgPool, func);
+  return func;
+}
 
 const withDefaultPostGraphileContext: WithPostGraphileContextFn = async (
-  options: {
-    pgPool: Pool;
-    jwtToken?: string;
-    jwtSecret?: string;
-    jwtAudiences?: Array<string>;
-    jwtRole: Array<string>;
-    jwtVerifyOptions?: jwt.VerifyOptions;
-    pgDefaultRole?: string;
-    pgSettings?: { [key: string]: mixed };
-    queryDocumentAst?: DocumentNode;
-    operationName?: string;
-    pgForceTransaction?: boolean;
-  },
-  callback: (context: mixed) => Promise<ExecutionResult>,
+  options: WithPostGraphileContextOptions,
+  callback: (context: PostGraphileContext) => Promise<ExecutionResult>,
 ): Promise<ExecutionResult> => {
   const {
     pgPool,
     jwtToken,
     jwtSecret,
+    jwtPublicKey,
     jwtAudiences,
     jwtRole = ['role'],
     jwtVerifyOptions,
@@ -52,6 +80,7 @@ const withDefaultPostGraphileContext: WithPostGraphileContextFn = async (
     queryDocumentAst,
     operationName,
     pgForceTransaction,
+    singleStatement,
   } = options;
 
   let operation: OperationDefinitionNode | void;
@@ -61,7 +90,9 @@ const withDefaultPostGraphileContext: WithPostGraphileContextFn = async (
       const definition = queryDocumentAst.definitions[i];
       if (definition.kind === Kind.OPERATION_DEFINITION) {
         if (!operationName && operation) {
-          throw new Error('Multiple unnamed operations present in GraphQL query.');
+          throw new Error(
+            'Multiple operations present in GraphQL query, you must specify an `operationName` so we know which one to execute.',
+          );
         } else if (!operationName || (definition.name && definition.name.value === operationName)) {
           operation = definition;
         }
@@ -72,9 +103,10 @@ const withDefaultPostGraphileContext: WithPostGraphileContextFn = async (
   // Warning: this is only set if pgForceTransaction is falsy
   const operationType = operation != null ? operation.operation : null;
 
-  const { role: pgRole, localSettings, jwtClaims } = await getSettingsForPgClientTransaction({
+  const { role: pgRole, localSettings, jwtClaims } = getSettingsForPgClientTransaction({
     jwtToken,
     jwtSecret,
+    jwtPublicKey,
     jwtAudiences,
     jwtRole,
     jwtVerifyOptions,
@@ -82,65 +114,108 @@ const withDefaultPostGraphileContext: WithPostGraphileContextFn = async (
     pgSettings,
   });
 
+  const sqlSettings: Array<sql.SQLQuery> = [];
+  if (localSettings.length > 0) {
+    // Later settings should win, so we're going to loop backwards and not
+    // add settings for keys we've already seen.
+    const seenKeys: Array<string> = [];
+    // TODO:perf: looping backwards is slow
+    for (let i = localSettings.length - 1; i >= 0; i--) {
+      const [key, value] = localSettings[i];
+      if (!seenKeys.includes(key)) {
+        seenKeys.push(key);
+        // Make sure that the third config is always `true` so that we are only
+        // ever setting variables on the transaction.
+        // Also, we're using `unshift` to undo the reverse-looping we're doing
+        sqlSettings.unshift(sql.fragment`set_config(${sql.value(key)}, ${sql.value(value)}, true)`);
+      }
+    }
+  }
+
+  const sqlSettingsQuery =
+    sqlSettings.length > 0 ? sql.compile(sql.query`select ${sql.join(sqlSettings, ', ')}`) : null;
+
   // If we can avoid transactions, we get greater performance.
   const needTransaction =
     pgForceTransaction ||
-    localSettings.length > 0 ||
+    !!sqlSettingsQuery ||
     (operationType !== 'query' && operationType !== 'subscription');
 
   // Now we've caught as many errors as we can at this stage, let's create a DB connection.
+  const withAuthenticatedPgClient: WithAuthenticatedPgClientFunction = !needTransaction
+    ? simpleWithPgClient(pgPool)
+    : async cb => {
+        // Connect a new Postgres client
+        const pgClient = await pgPool.connect();
 
-  // Connect a new Postgres client
-  const pgClient = await pgPool.connect();
+        // Begin our transaction
+        await pgClient.query('begin');
 
-  // Enhance our Postgres client with debugging stuffs.
-  if ((debugPg.enabled || debugPgError.enabled) && !pgClient[$$pgClientOrigQuery]) {
-    debugPgClient(pgClient);
-  }
+        try {
+          // If there is at least one local setting, load it into the database.
+          if (sqlSettingsQuery) {
+            await pgClient.query(sqlSettingsQuery);
+          }
 
-  // Begin our transaction, if necessary.
-  if (needTransaction) {
-    await pgClient.query('begin');
-  }
-
-  try {
-    // If there is at least one local setting, load it into the database.
-    if (needTransaction && localSettings.length !== 0) {
-      // Later settings should win, so we're going to loop backwards and not
-      // add settings for keys we've already seen.
-      const seenKeys: Array<string> = [];
-
-      const sqlSettings: Array<sql.SQLQuery> = [];
-      for (let i = localSettings.length - 1; i >= 0; i--) {
-        const [key, value] = localSettings[i];
-        if (seenKeys.indexOf(key) < 0) {
-          seenKeys.push(key);
-          // Make sure that the third config is always `true` so that we are only
-          // ever setting variables on the transaction.
-          // Also, we're using `unshift` to undo the reverse-looping we're doing
-          sqlSettings.unshift(
-            sql.fragment`set_config(${sql.value(key)}, ${sql.value(value)}, true)`,
-          );
+          // Use the client, wait for it to be finished with, then go to 'finally'
+          return await cb(pgClient);
+        } finally {
+          // Cleanup our Postgres client by ending the transaction and releasing
+          // the client back to the pool. Always do this even if the query fails.
+          try {
+            await pgClient.query('commit');
+          } finally {
+            pgClient.release();
+          }
         }
-      }
+      };
+  if (singleStatement) {
+    // TODO:v5: remove this workaround
+    /*
+     * This is a workaround for subscriptions; the GraphQL context is allocated
+     * for the entire duration of the subscription, however hogging a pgClient
+     * for more than a few milliseconds (let alone hours!) is a no-no. So we
+     * fake a PG client that will set up the transaction each time `query` is
+     * called. It's a very thin/dumb wrapper, so it supports nothing but
+     * `query`.
+     */
+    const fakePgClient: PoolClient = {
+      query(
+        textOrQueryOptions?: string | QueryConfig,
+        values?: Array<any>, // tslint:disable-line no-any
+        cb?: void,
+      ): Promise<QueryResult> {
+        if (!textOrQueryOptions) {
+          throw new Error('Incompatible call to singleStatement - no statement passed?');
+        } else if (typeof textOrQueryOptions === 'object') {
+          if (values || cb) {
+            throw new Error('Incompatible call to singleStatement - expected no callback');
+          }
+        } else if (typeof textOrQueryOptions !== 'string') {
+          throw new Error('Incompatible call to singleStatement - bad query');
+        } else if (values && !Array.isArray(values)) {
+          throw new Error('Incompatible call to singleStatement - bad values');
+        } else if (cb) {
+          throw new Error('Incompatible call to singleStatement - expected to return promise');
+        }
+        // Generate an authenticated client on the fly
+        return withAuthenticatedPgClient(pgClient => pgClient.query(textOrQueryOptions, values));
+      },
+    } as any; // tslint:disable-line no-any
 
-      const query = sql.compile(sql.query`select ${sql.join(sqlSettings, ', ')}`);
-
-      await pgClient.query(query);
-    }
-
-    return await callback({
-      [$$pgClient]: pgClient,
+    return callback({
+      [$$pgClient]: fakePgClient,
       pgRole,
       jwtClaims,
     });
-  } finally {
-    // Cleanup our Postgres client by ending the transaction and releasing
-    // the client back to the pool. Always do this even if the query fails.
-    if (needTransaction) {
-      await pgClient.query('commit');
-    }
-    pgClient.release();
+  } else {
+    return withAuthenticatedPgClient(pgClient =>
+      callback({
+        [$$pgClient]: pgClient,
+        pgRole,
+        jwtClaims,
+      }),
+    );
   }
 };
 
@@ -170,17 +245,8 @@ const withDefaultPostGraphileContext: WithPostGraphileContextFn = async (
  * ```
  */
 const withPostGraphileContext: WithPostGraphileContextFn = async (
-  options: {
-    pgPool: Pool;
-    jwtToken?: string;
-    jwtSecret?: string;
-    jwtAudiences?: Array<string>;
-    jwtRole: Array<string>;
-    jwtVerifyOptions?: jwt.VerifyOptions;
-    pgDefaultRole?: string;
-    pgSettings?: { [key: string]: mixed };
-  },
-  callback: (context: mixed) => Promise<ExecutionResult>,
+  options: WithPostGraphileContextOptions,
+  callback: (context: PostGraphileContext) => Promise<ExecutionResult>,
 ): Promise<ExecutionResult> => {
   const pluginHook = pluginHookFromOptions(options);
   const withContext = pluginHook('withPostGraphileContext', withDefaultPostGraphileContext, {
@@ -200,9 +266,10 @@ export default withPostGraphileContext;
 // client. If this happens it’s a huge security vulnerability. Never using the
 // keyword `return` in this function is a good first step. You can still throw
 // errors, however, as this will stop the request execution.
-async function getSettingsForPgClientTransaction({
+function getSettingsForPgClientTransaction({
   jwtToken,
   jwtSecret,
+  jwtPublicKey,
   jwtAudiences,
   jwtRole,
   jwtVerifyOptions,
@@ -210,17 +277,18 @@ async function getSettingsForPgClientTransaction({
   pgSettings,
 }: {
   jwtToken?: string;
-  jwtSecret?: string;
+  jwtSecret?: string | Buffer;
+  jwtPublicKey?: string | Buffer;
   jwtAudiences?: Array<string>;
   jwtRole: Array<string>;
   jwtVerifyOptions?: jwt.VerifyOptions;
   pgDefaultRole?: string;
   pgSettings?: { [key: string]: mixed };
-}): Promise<{
+}): {
   role: string | undefined;
   localSettings: Array<[string, string]>;
   jwtClaims: { [claimName: string]: mixed } | null;
-}> {
+} {
   // Setup our default role. Once we decode our token, the role may change.
   let role = pgDefaultRole;
   let jwtClaims: { [claimName: string]: mixed } = {};
@@ -231,16 +299,25 @@ async function getSettingsForPgClientTransaction({
     // Try to run `jwt.verify`. If it fails, capture the error and re-throw it
     // as a 403 error because the token is not trustworthy.
     try {
-      // If a JWT token was defined, but a secret was not provided to the server
-      // throw a 403 error.
-      if (typeof jwtSecret !== 'string') throw new Error('Not allowed to provide a JWT token.');
+      const jwtVerificationSecret = jwtPublicKey || jwtSecret;
+      // If a JWT token was defined, but a secret was not provided to the server or
+      // secret had unsupported type, throw a 403 error.
+      if (!Buffer.isBuffer(jwtVerificationSecret) && typeof jwtVerificationSecret !== 'string') {
+        // tslint:disable-next-line no-console
+        console.error(
+          `ERROR: '${
+            jwtPublicKey ? 'jwtPublicKey' : 'jwtSecret'
+          }' was not set to a string or buffer - rejecting JWT-authenticated request.`,
+        );
+        throw new Error('Not allowed to provide a JWT token.');
+      }
 
       if (jwtAudiences != null && jwtVerifyOptions && 'audience' in jwtVerifyOptions)
         throw new Error(
           `Provide either 'jwtAudiences' or 'jwtVerifyOptions.audience' but not both`,
         );
 
-      jwtClaims = jwt.verify(jwtToken, jwtSecret, {
+      const claims = jwt.verify(jwtToken, jwtVerificationSecret, {
         ...jwtVerifyOptions,
         audience:
           jwtAudiences ||
@@ -248,6 +325,13 @@ async function getSettingsForPgClientTransaction({
             ? undefinedIfEmpty(jwtVerifyOptions.audience)
             : ['postgraphile']),
       });
+
+      if (typeof claims === 'string') {
+        throw new Error('Invalid JWT payload');
+      }
+
+      // jwt.verify returns `object | string`; but the `object` part is really a map
+      jwtClaims = claims as typeof jwtClaims;
 
       const roleClaim = getPath(jwtClaims, jwtRole);
 
@@ -283,7 +367,10 @@ async function getSettingsForPgClientTransaction({
   // this prevents an accidentional overwriting
   if (pgSettings && typeof pgSettings === 'object') {
     for (const key in pgSettings) {
-      if (pgSettings.hasOwnProperty(key) && isPgSettingValid(pgSettings[key])) {
+      if (
+        Object.prototype.hasOwnProperty.call(pgSettings, key) &&
+        isPgSettingValid(pgSettings[key])
+      ) {
         if (key === 'role') {
           role = String(pgSettings[key]);
         } else {
@@ -302,7 +389,7 @@ async function getSettingsForPgClientTransaction({
   // If we have some JWT claims, we want to set those claims as local
   // settings with the namespace `jwt.claims`.
   for (const key in jwtClaims) {
-    if (jwtClaims.hasOwnProperty(key)) {
+    if (Object.prototype.hasOwnProperty.call(jwtClaims, key)) {
       const rawValue = jwtClaims[key];
       // Unsafe to pass raw object/array to pg.query -> set_config; instead JSONify
       const value: mixed =
@@ -322,16 +409,13 @@ async function getSettingsForPgClientTransaction({
 
 const $$pgClientOrigQuery = Symbol();
 
-const debugPg = createDebugger('postgraphile:postgres');
-const debugPgError = createDebugger('postgraphile:postgres:error');
-
 /**
  * Adds debug logging funcionality to a Postgres client.
  *
  * @private
  */
 // tslint:disable no-any
-function debugPgClient(pgClient: PoolClient): PoolClient {
+export function debugPgClient(pgClient: PoolClient): PoolClient {
   // If Postgres debugging is enabled, enhance our query function by adding
   // a debug statement.
   if (!pgClient[$$pgClientOrigQuery]) {
@@ -339,20 +423,44 @@ function debugPgClient(pgClient: PoolClient): PoolClient {
     // already set, use that.
     pgClient[$$pgClientOrigQuery] = pgClient.query;
 
-    // tslint:disable-next-line only-arrow-functions
-    pgClient.query = function(...args: Array<any>): any {
-      // Debug just the query text. We don’t want to debug variables because
-      // there may be passwords in there.
-      debugPg(args[0] && args[0].text ? args[0].text : args[0]);
-
-      // tslint:disable-next-line no-invalid-this
-      const promiseResult = pgClient[$$pgClientOrigQuery].apply(this, args);
-
-      // Report the error with our Postgres debugger.
-      promiseResult.catch((error: any) => debugPgError(error));
-
-      return promiseResult;
+    if (debugPgNotice.enabled) {
+      pgClient.on('notice', (msg: PgNotice) => {
+        debugPgErrorObject(debugPgNotice, msg);
+      });
+    }
+    const logError = (error: PgNotice | Error) => {
+      if (error.name && error['severity']) {
+        debugPgErrorObject(debugPgError, error as PgNotice);
+      } else {
+        debugPgError('%O', error);
+      }
     };
+
+    if (debugPg.enabled || debugPgError.enabled) {
+      // tslint:disable-next-line only-arrow-functions
+      pgClient.query = function(...args: Array<any>): any {
+        const [a, b, c] = args;
+        // If we understand it (and it uses the promises API), log it out
+        if (
+          (typeof a === 'string' && !c && (!b || Array.isArray(b))) ||
+          (typeof a === 'object' && !b && !c)
+        ) {
+          // Debug just the query text. We don’t want to debug variables because
+          // there may be passwords in there.
+          debugPg('%s', formatSQLForDebugging(a && a.text ? a.text : a));
+
+          const promiseResult = pgClient[$$pgClientOrigQuery].apply(this, args);
+
+          // Report the error with our Postgres debugger.
+          promiseResult.catch(logError);
+
+          return promiseResult;
+        } else {
+          // We don't understand it (e.g. `pgPool.query`), just let it happen.
+          return pgClient[$$pgClientOrigQuery].apply(this, args);
+        }
+      };
+    }
   }
 
   return pgClient;
@@ -400,3 +508,28 @@ function isPgSettingValid(pgSetting: mixed): boolean {
   );
 }
 // tslint:enable no-any
+interface PgNotice extends Error {
+  name: 'notice';
+  message: string;
+  length: number;
+  severity: string;
+  code: string;
+  detail: string | void;
+  hint: string | void;
+  where: string | void;
+  schema: string | void;
+  table: string | void;
+  column: string | void;
+  constraint: string | void;
+  file: string;
+  line: string;
+  routine: string;
+  /*
+  Not sure what these are:
+
+    position: any;
+    internalPosition: any;
+    internalQuery: any;
+    dataType: any;
+  */
+}

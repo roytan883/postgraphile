@@ -1,25 +1,45 @@
 # Sponsors
 
-These people and companies help accelerate the advancement of this project by
-sponsoring my work, e.g. via [Patreon](https://www.patreon.com/benjie).
+These individuals and companies give back to PostGraphile by sponsoring its
+ongoing development. Find out [how you can become a
+sponsor](https://graphile.org/sponsor/).
 
 ## Featured
 
-* Chad Furman
+- Chad Furman
+- Timescale
+- Point 72 Ventures
 
 ## Leaders
 
-* Joe Dennis
-* James Allain
-* Alec Wenzowski
-* MissionMode
-* DOMONDA
+- Joe Dennis
+- DOMONDA
+- James Allain
+- Stagency
+- NodeSource
+- 8th Light
+- Nigel Taylor
+- Jack Dinker
 
 ## Supporters
 
-* Mtpc
-* Clay Smith
-* Matt Bretl (also a major community contributor!)
-* Michael Tng
-* Bureau Moelijke Dingen
-* Centre for Effective Altruism
+- Daniel Einspanger
+- Michael Tng
+- Sam Levin
+- Matt Bretl (also a major community contributor!)
+- stlbucket
+- Michel Pelletier
+- Dan Lynch
+- James Rascoe
+- Chris Watland
+- James Cavanaugh
+- Mark Lipscombe
+- purge
+- Frank
+- Mark Rapoza
+- innovation.rocks
+- cybere
+- dwwoelfel
+- Bjørn Michelsen
+- Storyscript
+- cj

@@ -29,6 +29,9 @@ export const middleware = async (
     }
   };
 
+  // In case you're using koa-mount or similar
+  ctx.req['originalUrl'] = ctx.request.originalUrl;
+
   // Execute our request handler. If an error is thrown, we don’t call
   // `next` with an error. Instead we return the promise and let `koa`
   // handle the error.
@@ -38,6 +41,7 @@ export const middleware = async (
   } finally {
     (ctx.res as object)['end'] = oldEnd;
     if (ctx.res.statusCode && ctx.res.statusCode !== 200) {
+      // eslint-disable-next-line require-atomic-updates
       ctx.response.status = ctx.res.statusCode;
     }
   }

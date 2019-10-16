@@ -1,14 +1,34 @@
 import { AddFlagFn } from './cli';
-import { Server } from 'http';
+import { Server, IncomingMessage } from 'http';
 import { HttpRequestHandler, PostGraphileOptions } from '../interfaces';
 import { WithPostGraphileContextFn } from './withPostGraphileContext';
 import { version } from '../../package.json';
 import * as graphql from 'graphql';
+import { ExecutionParams } from 'subscriptions-transport-ws';
 
-export type HookFn<T> = (arg: T, context: {}) => T;
-export type PluginHookFn = <T>(hookName: string, argument: T, context?: {}) => T;
+// tslint:disable-next-line no-any
+export type HookFn<TArg, TContext = any> = (arg: TArg, context: TContext) => TArg;
+export type PluginHookFn = <TArgument, TContext = {}>(
+  hookName: string,
+  argument: TArgument,
+  context?: TContext,
+) => TArgument;
+
+export interface PostGraphileHTTPResult {
+  statusCode?: number;
+  result?: object;
+  errors?: Array<object>;
+  meta?: object;
+}
+export interface PostGraphileHTTPEnd {
+  statusCode?: number;
+  result: object | Array<object>;
+}
 export interface PostGraphilePlugin {
+  init?: HookFn<null>;
+
   pluginHook?: HookFn<PluginHookFn>;
+
   'cli:flags:add:standard'?: HookFn<AddFlagFn>;
   'cli:flags:add:schema'?: HookFn<AddFlagFn>;
   'cli:flags:add:errorHandling'?: HookFn<AddFlagFn>;
@@ -19,17 +39,29 @@ export interface PostGraphilePlugin {
   'cli:flags:add'?: HookFn<AddFlagFn>;
   'cli:flags:add:deprecated'?: HookFn<AddFlagFn>;
   'cli:flags:add:workarounds'?: HookFn<AddFlagFn>;
-
+  // tslint:disable-next-line no-any
+  'cli:library:options'?: HookFn<PostGraphileOptions, { config: any; cliOptions: any }>;
   'cli:server:middleware'?: HookFn<HttpRequestHandler>;
   'cli:server:created'?: HookFn<Server>;
+  'cli:greeting'?: HookFn<Array<string | null | void>>;
 
   'postgraphile:options'?: HookFn<PostGraphileOptions>;
+  'postgraphile:validationRules:static'?: HookFn<typeof graphql.specifiedRules>;
+  'postgraphile:graphiql:html'?: HookFn<string>;
+  'postgraphile:http:handler'?: HookFn<IncomingMessage>;
+  'postgraphile:http:result'?: HookFn<PostGraphileHTTPResult>;
+  'postgraphile:http:end'?: HookFn<PostGraphileHTTPEnd>;
+  'postgraphile:httpParamsList'?: HookFn<Array<object>>;
+  'postgraphile:validationRules'?: HookFn<typeof graphql.specifiedRules>; // AVOID THIS where possible; use 'postgraphile:validationRules:static' instead.
+  'postgraphile:middleware'?: HookFn<HttpRequestHandler>;
+  'postgraphile:ws:onOperation'?: HookFn<ExecutionParams>;
+
   withPostGraphileContext?: HookFn<WithPostGraphileContextFn>;
 }
 type HookName = keyof PostGraphilePlugin;
 
 const identityHook = <T>(input: T): T => input;
-const identityPluginHook = <T>(_hookName: HookName, input: T): T => input;
+const identityPluginHook: PluginHookFn = (_hookName, input, _options) => input;
 
 function contextIsSame(context1: {}, context2: {}): boolean {
   // Shortcut if obvious
@@ -48,7 +80,7 @@ function contextIsSame(context1: {}, context2: {}): boolean {
     if (context1[key] !== context2[key]) {
       return false;
     }
-    if (keys2.indexOf(key) === -1) {
+    if (!keys2.includes(key)) {
       return false;
     }
   }
@@ -79,18 +111,27 @@ function memoizeHook<T>(hook: HookFn<T>): HookFn<T> {
   };
 }
 
+function shouldMemoizeHook(hookName: HookName) {
+  return hookName === 'withPostGraphileContext';
+}
+
 function makeHook<T>(plugins: Array<PostGraphilePlugin>, hookName: HookName): HookFn<T> {
-  return memoizeHook<T>(
-    plugins.reduce((previousHook: HookFn<T>, plugin: {}) => {
-      if (typeof plugin[hookName] === 'function') {
-        return (argument: T, context: {}) => {
-          return plugin[hookName](previousHook(argument, context), context);
-        };
-      } else {
-        return previousHook;
-      }
-    }, identityHook),
-  );
+  const combinedHook = plugins.reduce((previousHook: HookFn<T>, plugin: {}) => {
+    if (typeof plugin[hookName] === 'function') {
+      return (argument: T, context: {}) => {
+        return plugin[hookName](previousHook(argument, context), context);
+      };
+    } else {
+      return previousHook;
+    }
+  }, identityHook);
+  if (combinedHook === identityHook) {
+    return identityHook;
+  } else if (shouldMemoizeHook(hookName)) {
+    return memoizeHook<T>(combinedHook);
+  } else {
+    return combinedHook;
+  }
 }
 
 export function makePluginHook(plugins: Array<PostGraphilePlugin>): PluginHookFn {

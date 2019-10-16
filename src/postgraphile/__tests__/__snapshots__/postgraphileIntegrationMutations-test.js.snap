@@ -1,4 +1,6 @@
-exports[`test mutation-create.graphql 1`] = `
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`mutation-create.graphql 1`] = `
 Object {
   "data": Object {
     "a": Object {
@@ -47,8 +49,8 @@ Object {
           "seconds": 1,
           "years": 6,
         },
-        "json": "{\"x\":1,\"y\":2,\"z\":3}",
-        "jsonb": "{\"a\":1,\"b\":2,\"c\":3}",
+        "json": "{\\"x\\":1,\\"y\\":2,\\"z\\":3}",
+        "jsonb": "{\\"a\\":1,\\"b\\":2,\\"c\\":3}",
         "money": 5000,
         "nestedCompoundType": Object {
           "a": Object {
@@ -111,7 +113,7 @@ Object {
         },
       },
       "c": Object {
-        "cursor": "WyJpZF9hc2MiLFs5MDAwLDkwMDBdXQ==",
+        "cursor": "WyJpZF9hc2MiLFs5MDAwXV0=",
         "node": Object {
           "name": "John Smith Jr.",
           "nodeId": "WyJwZW9wbGUiLDkwMDBd",
@@ -119,21 +121,21 @@ Object {
       },
       "clientMutationId": null,
       "d": Object {
-        "cursor": "WyJpZF9kZXNjIixbOTAwMCw5MDAwXV0=",
+        "cursor": "WyJpZF9kZXNjIixbOTAwMF1d",
         "node": Object {
           "name": "John Smith Jr.",
           "nodeId": "WyJwZW9wbGUiLDkwMDBd",
         },
       },
       "e": Object {
-        "cursor": "WyJlbWFpbF9hc2MiLFsiam9obm55LmJveS5zbWl0aEBlbWFpbC5jb20iLDkwMDBdXQ==",
+        "cursor": "WyJlbWFpbF9hc2MiLFsiam9obm55LmJveS5zbWl0aEBlbWFpbC5jb20iXV0=",
         "node": Object {
           "name": "John Smith Jr.",
           "nodeId": "WyJwZW9wbGUiLDkwMDBd",
         },
       },
       "f": Object {
-        "cursor": "WyJlbWFpbF9kZXNjIixbImpvaG5ueS5ib3kuc21pdGhAZW1haWwuY29tIiw5MDAwXV0=",
+        "cursor": "WyJlbWFpbF9kZXNjIixbImpvaG5ueS5ib3kuc21pdGhAZW1haWwuY29tIl1d",
         "node": Object {
           "name": "John Smith Jr.",
           "nodeId": "WyJwZW9wbGUiLDkwMDBd",
@@ -173,7 +175,7 @@ Object {
         },
       },
       "c": Object {
-        "cursor": "WyJpZF9hc2MiLFsyMCwyMF1d",
+        "cursor": "WyJpZF9hc2MiLFsyMF1d",
         "node": Object {
           "name": "Best Pal",
           "nodeId": "WyJwZW9wbGUiLDIwXQ==",
@@ -181,21 +183,21 @@ Object {
       },
       "clientMutationId": "hello",
       "d": Object {
-        "cursor": "WyJpZF9kZXNjIixbMjAsMjBdXQ==",
+        "cursor": "WyJpZF9kZXNjIixbMjBdXQ==",
         "node": Object {
           "name": "Best Pal",
           "nodeId": "WyJwZW9wbGUiLDIwXQ==",
         },
       },
       "e": Object {
-        "cursor": "WyJlbWFpbF9hc2MiLFsiYmVzdC5wYWxAZW1haWwuY29tIiwyMF1d",
+        "cursor": "WyJlbWFpbF9hc2MiLFsiYmVzdC5wYWxAZW1haWwuY29tIl1d",
         "node": Object {
           "name": "Best Pal",
           "nodeId": "WyJwZW9wbGUiLDIwXQ==",
         },
       },
       "f": Object {
-        "cursor": "WyJlbWFpbF9kZXNjIixbImJlc3QucGFsQGVtYWlsLmNvbSIsMjBdXQ==",
+        "cursor": "WyJlbWFpbF9kZXNjIixbImJlc3QucGFsQGVtYWlsLmNvbSJdXQ==",
         "node": Object {
           "name": "Best Pal",
           "nodeId": "WyJwZW9wbGUiLDIwXQ==",
@@ -279,7 +281,7 @@ Object {
         },
       },
       "c": Object {
-        "cursor": "WyJpZF9hc2MiLFsxOTk4LDE5OThdXQ==",
+        "cursor": "WyJpZF9hc2MiLFsxOTk4XV0=",
         "node": Object {
           "name": "Budd Deey",
           "nodeId": "WyJwZW9wbGUiLDE5OThd",
@@ -287,21 +289,21 @@ Object {
       },
       "clientMutationId": null,
       "d": Object {
-        "cursor": "WyJpZF9kZXNjIixbMTk5OCwxOTk4XV0=",
+        "cursor": "WyJpZF9kZXNjIixbMTk5OF1d",
         "node": Object {
           "name": "Budd Deey",
           "nodeId": "WyJwZW9wbGUiLDE5OThd",
         },
       },
       "e": Object {
-        "cursor": "WyJlbWFpbF9hc2MiLFsiYnVkZC5kZWV5LnRoZS5zZWNvbmRAZW1haWwuY29tIiwxOTk4XV0=",
+        "cursor": "WyJlbWFpbF9hc2MiLFsiYnVkZC5kZWV5LnRoZS5zZWNvbmRAZW1haWwuY29tIl1d",
         "node": Object {
           "name": "Budd Deey",
           "nodeId": "WyJwZW9wbGUiLDE5OThd",
         },
       },
       "f": Object {
-        "cursor": "WyJlbWFpbF9kZXNjIixbImJ1ZGQuZGVleS50aGUuc2Vjb25kQGVtYWlsLmNvbSIsMTk5OF1d",
+        "cursor": "WyJlbWFpbF9kZXNjIixbImJ1ZGQuZGVleS50aGUuc2Vjb25kQGVtYWlsLmNvbSJdXQ==",
         "node": Object {
           "name": "Budd Deey",
           "nodeId": "WyJwZW9wbGUiLDE5OThd",
@@ -329,7 +331,7 @@ Object {
 }
 `;
 
-exports[`test mutation-delete.graphql 1`] = `
+exports[`mutation-delete.graphql 1`] = `
 Object {
   "data": Object {
     "a": Object {
@@ -467,13 +469,13 @@ Object {
     },
   },
   "errors": Array [
-    [GraphQLError: No values were deleted in collection 'posts' because no values were found.],
-    [GraphQLError: No values were deleted in collection 'posts' because no values were found.],
+    [GraphQLError: No values were deleted in collection 'posts' because no values you can delete were found matching these criteria.],
+    [GraphQLError: No values were deleted in collection 'posts' because no values you can delete were found matching these criteria.],
   ],
 }
 `;
 
-exports[`test mutation-update.graphql 1`] = `
+exports[`mutation-update.graphql 1`] = `
 Object {
   "data": Object {
     "a": Object {
@@ -618,7 +620,7 @@ Object {
 }
 `;
 
-exports[`test procedure-mutation.graphql 1`] = `
+exports[`procedure-mutation.graphql 1`] = `
 Object {
   "data": Object {
     "add1Mutation": Object {
@@ -657,7 +659,7 @@ Object {
       ],
     },
     "jsonIdentityMutation": Object {
-      "json": "{\"a\":1,\"b\":2,\"c\":3}",
+      "json": "{\\"a\\":1,\\"b\\":2,\\"c\\":3}",
     },
     "mult1": Object {
       "integer": 0,

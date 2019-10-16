@@ -1,8 +1,17 @@
 #!/usr/bin/env node
-import { resolve as resolvePath } from 'path';
-import { readFileSync } from 'fs';
+// tslint:disable no-console
+
+/*
+ * IMPORTANT: the './postgraphilerc' import MUST come first!
+ *
+ * Reason: enables user to apply modifications to their Node.js environment
+ * (e.g. sourcing modules that affect global state, like dotenv) before any of
+ * our other require()s occur.
+ */
+import config from './postgraphilerc';
+
 import { createServer } from 'http';
-import chalk = require('chalk');
+import chalk from 'chalk';
 import program = require('commander');
 import jwt = require('jsonwebtoken');
 import { parse as parsePgConnectionString } from 'pg-connection-string';
@@ -12,28 +21,23 @@ import cluster = require('cluster');
 import { makePluginHook, PostGraphilePlugin } from './pluginHook';
 import debugFactory = require('debug');
 import { mixed } from '../interfaces';
+import * as manifest from '../../package.json';
+import sponsors = require('../../sponsors.json');
+import { enhanceHttpServerWithSubscriptions } from './http/subscriptions';
+
+const isDev = process.env.POSTGRAPHILE_ENV === 'development';
+
+// tslint:disable-next-line no-any
+function isString(str: any): str is string {
+  return typeof str === 'string';
+}
+
+const sponsor = sponsors[Math.floor(sponsors.length * Math.random())];
 
 const debugCli = debugFactory('postgraphile:cli');
 
-// tslint:disable no-console
-
-let postgraphileRCFile: string | null = null;
-try {
-  postgraphileRCFile = require.resolve(process.cwd() + '/.postgraphilerc');
-} catch (e) {
-  // No postgraphileRC; carry on
-}
-let config = {};
-if (postgraphileRCFile) {
-  config = require(postgraphileRCFile); // tslint:disable-line no-var-requires
-  if (!config.hasOwnProperty('options')) {
-    console.warn('WARNING: Your configuration file does not export any options');
-  }
-}
 // TODO: Demo Postgres database
 const DEMO_PG_URL = null;
-
-const manifest = JSON.parse(readFileSync(resolvePath(__dirname, '../../package.json')).toString());
 
 function extractPlugins(
   rawArgv: Array<string>,
@@ -91,16 +95,28 @@ function addFlag(
 program
   .option(
     '--plugins <string>',
-    'a list of postgraphile plugins (not Graphile-Build plugins) to load, MUST be the first option',
+    'a list of PostGraphile server plugins (not Graphile Engine schema plugins) to load; if present, must be the _first_ option',
   )
   .option(
     '-c, --connection <string>',
-    "the PostgreSQL database name or connection string (if omitted, inferred from environmental variables). Examples: 'db', 'postgres:///db', 'postgres://user:password@domain:port/db?ssl=1'",
+    "the PostgreSQL database name or connection string. If omitted, inferred from environmental variables (see https://www.postgresql.org/docs/current/static/libpq-envars.html). Examples: 'db', 'postgres:///db', 'postgres://user:password@domain:port/db?ssl=1'",
+  )
+  .option(
+    '-C, --owner-connection <string>',
+    'as `--connection`, but for a privileged user (e.g. for setting up watch fixtures, logical decoding, etc); defaults to the value from `--connection`',
   )
   .option(
     '-s, --schema <string>',
     'a Postgres schema to be introspected. Use commas to define multiple schemas',
     (option: string) => option.split(','),
+  )
+  .option(
+    '-S, --subscriptions',
+    'Enable GraphQL websocket transport support for subscriptions (you still need a subscriptions plugin currently)',
+  )
+  .option(
+    '-L, --live',
+    '[EXPERIMENTAL] Enables live-query support via GraphQL subscriptions (sends updated payload any time nested collections/records change). Implies --subscriptions',
   )
   .option(
     '-w, --watch',
@@ -116,6 +132,10 @@ program
   .option(
     '-r, --default-role <string>',
     'the default Postgres role to use when a request is made. supercedes the role used to connect to the database',
+  )
+  .option(
+    '--retry-on-init-fail',
+    'if an error occurs building the initial schema, this flag will cause PostGraphile to keep trying to build the schema with exponential backoff rather than exiting',
   );
 
 pluginHook('cli:flags:add:standard', addFlag);
@@ -141,7 +161,11 @@ program
   )
   .option(
     '--no-ignore-rbac',
-    "[RECOMMENDED] set this to excludes fields, queries and mutations that the user isn't permitted to access; this will be the default in v5",
+    '[RECOMMENDED] set this to exclude fields, queries and mutations that are not available to any possible user (determined from the user in connection string and any role they can become); this will be enabled by default in v5',
+  )
+  .option(
+    '--no-ignore-indexes',
+    '[RECOMMENDED] set this to exclude filters, orderBy, and relations that would be expensive to access due to missing indexes',
   )
   .option(
     '--include-extension-resources',
@@ -168,13 +192,16 @@ pluginHook('cli:flags:add:errorHandling', addFlag);
 program
   .option(
     '--append-plugins <string>',
-    'a comma-separated list of plugins to append to the list of GraphQL schema plugins',
+    'a comma-separated list of plugins to append to the list of Graphile Engine schema plugins',
   )
   .option(
     '--prepend-plugins <string>',
-    'a comma-separated list of plugins to prepend to the list of GraphQL schema plugins',
+    'a comma-separated list of plugins to prepend to the list of Graphile Engine schema plugins',
   )
-  .option('--skip-plugins <string>', 'a comma-separated list of plugins to skip');
+  .option(
+    '--skip-plugins <string>',
+    'a comma-separated list of Graphile Engine schema plugins to skip',
+  );
 
 pluginHook('cli:flags:add:plugins', addFlag);
 
@@ -197,6 +224,10 @@ program
     'enables exporting the detected schema, in GraphQL schema format, to the given location. The directories must exist already, if the file exists it will be overwritten.',
   )
   .option(
+    '--sort-export',
+    'lexicographically (alphabetically) sort exported schema for more stable diffing.',
+  )
+  .option(
     '-X, --no-server',
     '[experimental] for when you just want to use --write-cache or --export-schema-* and not actually run a server (e.g. CI)',
   );
@@ -212,6 +243,10 @@ program
   .option(
     '-i, --graphiql <path>',
     'the route to mount the GraphiQL interface on. defaults to `/graphiql`',
+  )
+  .option(
+    '--enhance-graphiql',
+    '[DEVELOPMENT] opt in to additional GraphiQL functionality (this may change over time - only intended for use in development; automatically enables with `subscriptions` and `live`)',
   )
   .option(
     '-b, --disable-graphiql',
@@ -292,12 +327,22 @@ pluginHook('cli:flags:add', addFlag);
 
 // Deprecated
 program
-  .option('--token <identifier>', 'DEPRECATED: use --jwt-token-identifier instead')
-  .option('--secret <string>', 'DEPRECATED: Use --jwt-secret instead')
+  .option(
+    '--token <identifier>',
+    '[DEPRECATED] Use --jwt-token-identifier instead. This option will be removed in v5.',
+  )
+  .option(
+    '--secret <string>',
+    '[DEPRECATED] Use --jwt-secret instead. This option will be removed in v5.',
+  )
   .option(
     '--jwt-audiences <string>',
-    'DEPRECATED Use --jwt-verify-audience instead',
+    '[DEPRECATED] Use --jwt-verify-audience instead. This option will be removed in v5.',
     (option: string) => option.split(','),
+  )
+  .option(
+    '--legacy-functions-only',
+    '[DEPRECATED] PostGraphile 4.1.0 introduced support for PostgreSQL functions than declare parameters with IN/OUT/INOUT or declare RETURNS TABLE(...); enable this flag to ignore these types of functions. This option will be removed in v5.',
   );
 
 pluginHook('cli:flags:add:deprecated', addFlag);
@@ -316,12 +361,12 @@ program
 pluginHook('cli:flags:add:workarounds', addFlag);
 
 program.on('--help', () => {
-  console.log(`\
-  Get started:
+  console.log(`
+Get started:
 
-    $ postgraphile
-    $ postgraphile -c postgres://localhost/my_db
-    $ postgraphile --connection postgres://user:pass@localhost/my_db --schema my_schema --watch --dynamic-json
+  $ postgraphile
+  $ postgraphile -c postgres://localhost/my_db
+  $ postgraphile --connection postgres://user:pass@localhost/my_db --schema my_schema --watch --dynamic-json
 `);
   process.exit(0);
 });
@@ -337,11 +382,26 @@ process.on('SIGINT', () => {
   process.exit(1);
 });
 
+// For `--no-*` options, `program` automatically contains the default,
+// overriding our options. We typically want the CLI to "win", but not
+// with defaults! So this code extracts those `--no-*` values and
+// re-overwrites the values if necessary.
+const configOptions = config['options'] || {};
+const overridesFromOptions = {};
+['ignoreIndexes', 'ignoreRbac', 'setofFunctionsContainNulls'].forEach(option => {
+  if (option in configOptions) {
+    overridesFromOptions[option] = configOptions[option];
+  }
+});
+
 // Destruct our configuration file and command line arguments, use defaults, and rename options to
 // something appropriate for JavaScript.
 const {
   demo: isDemo = false,
   connection: pgConnectionString,
+  ownerConnection,
+  subscriptions,
+  live,
   watch: watchPg,
   schema: dbSchema,
   host: hostname = 'localhost',
@@ -349,11 +409,14 @@ const {
   timeout: serverTimeout,
   maxPoolSize,
   defaultRole: pgDefaultRole,
+  retryOnInitFail,
   graphql: graphqlRoute = '/graphql',
   graphiql: graphiqlRoute = '/graphiql',
+  enhanceGraphiql = false,
   disableGraphiql = false,
   secret: deprecatedJwtSecret,
   jwtSecret,
+  jwtPublicKey,
   jwtAudiences,
   jwtVerifyAlgorithms,
   jwtVerifyAudience,
@@ -363,6 +426,8 @@ const {
   jwtVerifyIgnoreNotBefore,
   jwtVerifyIssuer,
   jwtVerifySubject,
+  jwtSignOptions = {},
+  jwtVerifyOptions: rawJwtVerifyOptions,
   jwtRole = ['role'],
   token: deprecatedJwtPgTypeIdentifier,
   jwtTokenIdentifier: jwtPgTypeIdentifier,
@@ -374,6 +439,7 @@ const {
   includeExtensionResources = false,
   exportSchemaJson: exportJsonSchemaPath,
   exportSchemaGraphql: exportGqlSchemaPath,
+  sortExport = false,
   showErrorStack,
   extendedErrors = [],
   bodySizeLimit,
@@ -391,11 +457,13 @@ const {
   legacyJsonUuid,
   disableQueryLog,
   simpleCollections,
+  legacyFunctionsOnly,
+  ignoreIndexes,
   // tslint:disable-next-line no-any
-} = { ...config['options'], ...program } as any;
+} = { ...config['options'], ...program, ...overridesFromOptions } as typeof program;
 
 let legacyRelations: 'omit' | 'deprecated' | 'only';
-if (['omit', 'only', 'deprecated'].indexOf(rawLegacyRelations) < 0) {
+if (!['omit', 'only', 'deprecated'].includes(rawLegacyRelations)) {
   throw new Error(
     `Invalid argument to '--legacy-relations' - expected on of 'omit', 'deprecated', 'only'; but received '${rawLegacyRelations}'`,
   );
@@ -410,6 +478,22 @@ const noServer = !yesServer;
 // schema is what we want.
 const schemas: Array<string> = dbSchema || (isDemo ? ['forum_example'] : ['public']);
 
+const ownerConnectionString = ownerConnection || pgConnectionString || process.env.DATABASE_URL;
+
+// Work around type mismatches between parsePgConnectionString and PoolConfig
+const coerce = (o: ReturnType<typeof parsePgConnectionString>): PoolConfig => {
+  return {
+    ...o,
+    application_name: o['application_name'] || undefined,
+    ssl: o.ssl != null ? !!o.ssl : undefined,
+    user: typeof o.user === 'string' ? o.user : undefined,
+    database: typeof o.database === 'string' ? o.database : undefined,
+    password: typeof o.password === 'string' ? o.password : undefined,
+    port: o.port || typeof o.port === 'number' ? o.port : undefined,
+    host: typeof o.host === 'string' ? o.host : undefined,
+  };
+};
+
 // Create our Postgres config.
 const pgConfig: PoolConfig = {
   // If we have a Postgres connection string, parse it and use that as our
@@ -417,9 +501,9 @@ const pgConfig: PoolConfig = {
   // variables or final defaults. Other environment variables should be
   // detected and used by `pg`.
   ...(pgConnectionString || process.env.DATABASE_URL || isDemo
-    ? parsePgConnectionString(pgConnectionString || process.env.DATABASE_URL || DEMO_PG_URL)
+    ? coerce(parsePgConnectionString(pgConnectionString || process.env.DATABASE_URL || DEMO_PG_URL))
     : {
-        host: process.env.PGHOST || 'localhost',
+        host: process.env.PGHOST || process.env.PGHOSTADDR || 'localhost',
         port: (process.env.PGPORT ? parseInt(process.env.PGPORT, 10) : null) || 5432,
         database: process.env.PGDATABASE,
         user: process.env.PGUSER,
@@ -449,12 +533,9 @@ const loadPlugins = (rawNames: mixed) => {
       throw e;
     }
     let plugin = root;
-    while (true) {
-      const part = parts.shift();
-      if (part == null) {
-        break;
-      }
-      plugin = root[part];
+    let part: string | void;
+    while ((part = parts.shift())) {
+      plugin = plugin[part];
       if (plugin == null) {
         throw new Error(`No plugin found matching spec '${name}' - failed at '${part}'`);
       }
@@ -484,16 +565,33 @@ function trimNulls(obj: object): object {
   }, {});
 }
 
-const jwtVerifyOptions: jwt.VerifyOptions = trimNulls({
-  algorithms: jwtVerifyAlgorithms,
-  audience: jwtVerifyAudience,
-  clockTolerance: jwtVerifyClockTolerance,
-  jwtId: jwtVerifyId,
-  ignoreExpiration: jwtVerifyIgnoreExpiration,
-  ignoreNotBefore: jwtVerifyIgnoreNotBefore,
-  issuer: jwtVerifyIssuer,
-  subject: jwtVerifySubject,
-});
+if (
+  rawJwtVerifyOptions &&
+  (jwtVerifyAlgorithms ||
+    jwtVerifyAudience ||
+    jwtVerifyClockTolerance ||
+    jwtVerifyId ||
+    jwtVerifyIgnoreExpiration ||
+    jwtVerifyIgnoreNotBefore ||
+    jwtVerifyIssuer ||
+    jwtVerifySubject)
+) {
+  throw new Error(
+    'You may not mix `jwtVerifyOptions` with the legacy `jwtVerify*` settings; please only provide `jwtVerifyOptions`.',
+  );
+}
+const jwtVerifyOptions: jwt.VerifyOptions = rawJwtVerifyOptions
+  ? rawJwtVerifyOptions
+  : trimNulls({
+      algorithms: jwtVerifyAlgorithms,
+      audience: jwtVerifyAudience,
+      clockTolerance: jwtVerifyClockTolerance,
+      jwtId: jwtVerifyId,
+      ignoreExpiration: jwtVerifyIgnoreExpiration,
+      ignoreNotBefore: jwtVerifyIgnoreNotBefore,
+      issuer: jwtVerifyIssuer,
+      subject: jwtVerifySubject,
+    });
 
 // The options to pass through to the schema builder, or the middleware
 const postgraphileOptions = pluginHook(
@@ -508,12 +606,18 @@ const postgraphileOptions = pluginHook(
     graphqlRoute,
     graphiqlRoute,
     graphiql: !disableGraphiql,
+    enhanceGraphiql: enhanceGraphiql ? true : undefined,
     jwtPgTypeIdentifier: jwtPgTypeIdentifier || deprecatedJwtPgTypeIdentifier,
     jwtSecret: jwtSecret || deprecatedJwtSecret,
+    jwtPublicKey,
     jwtAudiences,
+    jwtSignOptions,
     jwtRole,
     jwtVerifyOptions,
+    retryOnInitFail,
     pgDefaultRole,
+    subscriptions: subscriptions || live,
+    live,
     watchPg,
     showErrorStack,
     extendedErrors,
@@ -521,6 +625,7 @@ const postgraphileOptions = pluginHook(
     enableCors,
     exportJsonSchemaPath,
     exportGqlSchemaPath,
+    sortExport,
     bodySizeLimit,
     appendPlugins: loadPlugins(appendPluginNames),
     prependPlugins: loadPlugins(prependPluginNames),
@@ -533,14 +638,30 @@ const postgraphileOptions = pluginHook(
     enableQueryBatching,
     pluginHook,
     simpleCollections,
+    legacyFunctionsOnly,
+    ignoreIndexes,
+    ownerConnectionString,
   },
   { config, cliOptions: program },
 );
 
+function killAllWorkers(signal = 'SIGTERM'): void {
+  for (const id in cluster.workers) {
+    const worker = cluster.workers[id];
+    if (Object.prototype.hasOwnProperty.call(cluster.workers, id) && worker) {
+      worker.kill(signal);
+    }
+  }
+}
+
 if (noServer) {
   // No need for a server, let's just spin up the schema builder
-  (async () => {
+  (async (): Promise<void> => {
     const pgPool = new Pool(pgConfig);
+    pgPool.on('error', err => {
+      // tslint:disable-next-line no-console
+      console.error('PostgreSQL client generated error: ', err.message);
+    });
     const { getGraphQLSchema } = getPostgraphileSchemaBuilder(pgPool, schemas, postgraphileOptions);
     await getGraphQLSchema();
     if (!watchPg) {
@@ -552,14 +673,6 @@ if (noServer) {
     process.exit(1);
   });
 } else {
-  function killAllWorkers(signal = 'SIGTERM'): void {
-    for (const id in cluster.workers) {
-      if (cluster.workers.hasOwnProperty(id) && !!cluster.workers[id]) {
-        cluster.workers[id]!.kill(signal);
-      }
-    }
-  }
-
   if (clusterWorkers >= 2 && cluster.isMaster) {
     let shuttingDown = false;
     const shutdown = () => {
@@ -624,6 +737,10 @@ if (noServer) {
       server.timeout = serverTimeout;
     }
 
+    if (postgraphileOptions.subscriptions) {
+      enhanceHttpServerWithSubscriptions(server, middleware);
+    }
+
     pluginHook('cli:server:created', server, {
       options: postgraphileOptions,
       middleware,
@@ -635,7 +752,9 @@ if (noServer) {
       const address = server.address();
       const actualPort = typeof address === 'string' ? port : address.port;
       const self = cluster.isMaster
-        ? 'server'
+        ? isDev
+          ? `server (pid=${process.pid})`
+          : 'server'
         : `worker ${process.env.POSTGRAPHILE_WORKER_NUMBER} (pid=${process.pid})`;
       const versionString = `v${manifest.version}`;
       if (cluster.isMaster || process.env.POSTGRAPHILE_WORKER_NUMBER === '1') {
@@ -664,25 +783,38 @@ if (noServer) {
               pgPort !== 5432 ? `:${pgConfig.port || 5432}` : ''
             }${pgDatabase ? `/${pgDatabase}` : ''}`;
 
-        const information = pluginHook(
+        const information: Array<string> = pluginHook(
           'cli:greeting',
           [
             `GraphQL API:         ${chalk.underline.bold.blue(
               `http://${hostname}:${actualPort}${graphqlRoute}`,
-            )}`,
+            )}` +
+              (postgraphileOptions.subscriptions
+                ? ` (${postgraphileOptions.live ? 'live ' : ''}subscriptions enabled)`
+                : ''),
             !disableGraphiql &&
               `GraphiQL GUI/IDE:    ${chalk.underline.bold.blue(
                 `http://${hostname}:${actualPort}${graphiqlRoute}`,
-              )}`,
-            `Postgres connection: ${chalk.underline.magenta(safeConnectionString)}`,
+              )}` +
+                (postgraphileOptions.enhanceGraphiql ||
+                postgraphileOptions.live ||
+                postgraphileOptions.subscriptions
+                  ? ''
+                  : ` (enhance with '--enhance-graphiql')`),
+            `Postgres connection: ${chalk.underline.magenta(safeConnectionString)}${
+              postgraphileOptions.watchPg ? ' (watching)' : ''
+            }`,
             `Postgres schema(s):  ${schemas.map(schema => chalk.magenta(schema)).join(', ')}`,
             `Documentation:       ${chalk.underline(
               `https://graphile.org/postgraphile/introduction/`,
             )}`,
-            extractedPlugins.length === 0 &&
-              `Please support PostGraphile development: ${chalk.underline.bold.blue(
-                `https://graphile.org/donate`,
-              )}`,
+            extractedPlugins.length === 0
+              ? `Join ${chalk.bold(
+                  sponsor,
+                )} in supporting PostGraphile development: ${chalk.underline.bold.blue(
+                  `https://graphile.org/sponsor/`,
+                )}`
+              : null,
           ],
           {
             options: postgraphileOptions,
@@ -690,7 +822,7 @@ if (noServer) {
             port: actualPort,
             chalk,
           },
-        ).filter(Boolean);
+        ).filter(isString);
         console.log(information.map(msg => `  ‣ ${msg}`).join('\n'));
 
         console.log('');
