@@ -29,6 +29,9 @@ import finalHandler = require('finalhandler');
 import bodyParser = require('body-parser');
 import crypto = require('crypto');
 
+const CACHE_MULTIPLIER = 100000;
+
+const ALLOW_EXPLAIN_PLACEHOLDER = '__SHOULD_ALLOW_EXPLAIN__';
 const noop = () => {
   /* noop */
 };
@@ -114,18 +117,32 @@ function withPostGraphileContextFromReqResGenerator(
   moreOptions: any,
   fn: (ctx: mixed) => any,
 ) => Promise<any> {
-  const { pgSettings, jwtSecret, additionalGraphQLContextFromRequest } = options;
+  const {
+    pgSettings: pgSettingsGenerator,
+    allowExplain: allowExplainGenerator,
+    jwtSecret,
+    additionalGraphQLContextFromRequest,
+  } = options;
   return async (req, res, moreOptions, fn) => {
     const jwtToken = jwtSecret ? getJwtToken(req) : null;
     const additionalContext =
       typeof additionalGraphQLContextFromRequest === 'function'
         ? await additionalGraphQLContextFromRequest(req, res)
         : null;
+    const pgSettings =
+      typeof pgSettingsGenerator === 'function'
+        ? await pgSettingsGenerator(req)
+        : pgSettingsGenerator;
+    const allowExplain =
+      typeof allowExplainGenerator === 'function'
+        ? await allowExplainGenerator(req)
+        : allowExplainGenerator;
     return withPostGraphileContext(
       {
         ...options,
         jwtToken,
-        pgSettings: typeof pgSettings === 'function' ? await pgSettings(req) : pgSettings,
+        pgSettings,
+        explain: allowExplain && req.headers['x-postgraphile-explain'] === 'on',
         ...moreOptions,
       },
       context => {
@@ -308,9 +325,12 @@ export default function createPostGraphileHttpRequestHandler(
     validationErrors: ReadonlyArray<GraphQLError>;
     length: number;
   }
-  const queryCache = new LRU({
-    maxLength: Math.ceil(queryCacheMaxSize / 100000),
-  });
+
+  const cacheSize = Math.ceil(queryCacheMaxSize / CACHE_MULTIPLIER);
+
+  // Do not create an LRU for cache size < 2 because @graphile/lru will baulk.
+  const cacheEnabled = cacheSize >= 2;
+  const queryCache = cacheEnabled ? new LRU({ maxLength: cacheSize }) : null;
 
   let lastGqlSchema: GraphQLSchema;
   const parseQuery = (
@@ -321,16 +341,18 @@ export default function createPostGraphileHttpRequestHandler(
     validationErrors: ReadonlyArray<GraphQLError>;
   } => {
     if (gqlSchema !== lastGqlSchema) {
-      queryCache.reset();
+      if (queryCache) {
+        queryCache.reset();
+      }
       lastGqlSchema = gqlSchema;
     }
 
     // Only cache queries that are less than 100kB, we don't want DOS attacks
     // attempting to exhaust our memory.
-    const canCache = queryCacheMaxSize > 0 && queryString.length < 100000;
+    const canCache = cacheEnabled && queryString.length < 100000;
 
     const hash = canCache ? calculateQueryHash(queryString) : null;
-    const result = canCache ? queryCache.get(hash!) : null;
+    const result = canCache ? queryCache!.get(hash!) : null;
     if (result) {
       return result;
     } else {
@@ -356,7 +378,7 @@ export default function createPostGraphileHttpRequestHandler(
         length: queryString.length,
       };
       if (canCache) {
-        queryCache.set(hash!, cacheResult);
+        queryCache!.set(hash!, cacheResult);
       }
       return cacheResult;
     }
@@ -390,6 +412,10 @@ export default function createPostGraphileHttpRequestHandler(
             streamUrl: watchPg ? `${externalUrlBase}${streamRoute}` : null,
             enhanceGraphiql,
             subscriptions,
+            allowExplain:
+              typeof options.allowExplain === 'function'
+                ? ALLOW_EXPLAIN_PLACEHOLDER
+                : !!options.allowExplain,
           })};</script>\n  </head>`,
         )
       : null;
@@ -545,7 +571,16 @@ export default function createPostGraphileHttpRequestHandler(
         }
 
         // Actually renders GraphiQL.
-        res.end(graphiqlHtml);
+        if (graphiqlHtml && typeof options.allowExplain === 'function') {
+          res.end(
+            graphiqlHtml.replace(
+              `"${ALLOW_EXPLAIN_PLACEHOLDER}"`, // Because JSON escaped
+              JSON.stringify(!!(await options.allowExplain(req))),
+            ),
+          );
+        } else {
+          res.end(graphiqlHtml);
+        }
         return;
       }
     }
@@ -739,7 +774,7 @@ export default function createPostGraphileHttpRequestHandler(
                 },
                 (graphqlContext: any) => {
                   pgRole = graphqlContext.pgRole;
-                  return executeGraphql(
+                  const graphqlResult = executeGraphql(
                     gqlSchema,
                     queryDocumentAst!,
                     null,
@@ -747,6 +782,15 @@ export default function createPostGraphileHttpRequestHandler(
                     variables,
                     operationName,
                   );
+                  if (typeof graphqlContext.getExplainResults === 'function') {
+                    return Promise.resolve(graphqlResult).then(async obj => ({
+                      ...obj,
+                      // Add our explain data
+                      explain: await graphqlContext.getExplainResults(),
+                    }));
+                  } else {
+                    return graphqlResult;
+                  }
                 },
               );
             }
@@ -945,6 +989,8 @@ function addCORSHeaders(res: ServerResponse): void {
       // like in a POST request.
       'Content-Type',
       'Content-Length',
+      // For our 'Explain' feature
+      'X-PostGraphile-Explain',
     ].join(', '),
   );
   res.setHeader('Access-Control-Expose-Headers', ['X-GraphQL-Event-Stream'].join(', '));

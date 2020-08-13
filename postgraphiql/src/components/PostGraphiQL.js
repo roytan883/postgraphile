@@ -1,11 +1,12 @@
 import React from 'react';
 import GraphiQL from 'graphiql';
-import { parse } from 'graphql';
+import { getOperationAST, parse } from 'graphql';
 import GraphiQLExplorer from 'graphiql-explorer';
 import StorageAPI from 'graphiql/dist/utility/StorageAPI';
 import './postgraphiql.css';
 import { buildClientSchema, introspectionQuery, isType, GraphQLObjectType } from 'graphql';
 import { SubscriptionClient } from 'subscriptions-transport-ws';
+import formatSQL from '../formatSQL';
 
 const defaultQuery = `\
 # Welcome to PostGraphile's built-in GraphiQL IDE
@@ -40,11 +41,13 @@ const defaultQuery = `\
 #
 `;
 
-const isSubscription = ({ query }) =>
-  parse(query).definitions.some(
-    definition =>
-      definition.kind === 'OperationDefinition' && definition.operation === 'subscription',
-  );
+const isSubscription = ({ query, operationName }) => {
+  const node = parse(query);
+
+  const operation = getOperationAST(node, operationName);
+
+  return operation && operation.operation === 'subscription';
+};
 
 const {
   POSTGRAPHILE_CONFIG = {
@@ -52,6 +55,7 @@ const {
     streamUrl: 'http://localhost:5000/graphql/stream',
     enhanceGraphiql: true,
     subscriptions: true,
+    allowExplain: true,
   },
 } = window;
 
@@ -71,6 +75,12 @@ const websocketUrl = POSTGRAPHILE_CONFIG.graphqlUrl.match(/^https?:/)
       l.port !== 80 && l.port !== 443 ? ':' + l.port : ''
     }${POSTGRAPHILE_CONFIG.graphqlUrl}`;
 
+const STORAGE_KEYS = {
+  SAVE_HEADERS_TEXT: 'PostGraphiQL:saveHeadersText',
+  HEADERS_TEXT: 'PostGraphiQL:headersText',
+  EXPLAIN: 'PostGraphiQL:explain',
+};
+
 /**
  * The standard GraphiQL interface wrapped with some PostGraphile extensions.
  * Including a JWT setter and live schema udpate capabilities.
@@ -85,7 +95,10 @@ class PostGraphiQL extends React.PureComponent {
     schema: null,
     query: '',
     showHeaderEditor: false,
-    headersText: '{\n"Authorization": null\n}\n',
+    saveHeadersText: this._storage.get(STORAGE_KEYS.SAVE_HEADERS_TEXT) === 'true',
+    headersText: this._storage.get(STORAGE_KEYS.HEADERS_TEXT) || '{\n"Authorization": null\n}\n',
+    explain: this._storage.get(STORAGE_KEYS.EXPLAIN) === 'true',
+    explainResult: null,
     headersTextValid: true,
     explorerIsOpen: this._storage.get('explorerIsOpen') === 'false' ? false : true,
     haveActiveSubscription: false,
@@ -295,6 +308,9 @@ class PostGraphiQL extends React.PureComponent {
         {
           Accept: 'application/json',
           'Content-Type': 'application/json',
+          ...(this.state.explain && POSTGRAPHILE_CONFIG.allowExplain
+            ? { 'X-PostGraphile-Explain': 'on' }
+            : null),
         },
         extraHeaders,
       ),
@@ -303,6 +319,8 @@ class PostGraphiQL extends React.PureComponent {
     });
 
     const result = await response.json();
+
+    this.setState({ explainResult: result && result.explain ? result.explain : null });
 
     return result;
   }
@@ -510,6 +528,36 @@ class PostGraphiQL extends React.PureComponent {
     );
   };
 
+  handleToggleSaveHeaders = () => {
+    this.setState(
+      oldState => ({ saveHeadersText: !oldState.saveHeadersText }),
+      () => {
+        this._storage.set(
+          STORAGE_KEYS.SAVE_HEADERS_TEXT,
+          JSON.stringify(this.state.saveHeadersText),
+        );
+        this._storage.set(
+          STORAGE_KEYS.HEADERS_TEXT,
+          this.state.saveHeadersText ? this.state.headersText : '',
+        );
+      },
+    );
+  };
+
+  handleToggleExplain = () => {
+    this.setState(
+      oldState => ({ explain: !oldState.explain }),
+      () => {
+        this._storage.set(STORAGE_KEYS.EXPLAIN, JSON.stringify(this.state.explain));
+        try {
+          this.graphiql.handleRunQuery();
+        } catch (e) {
+          /* ignore */
+        }
+      },
+    );
+  };
+
   renderSocketStatus() {
     const { socketStatus, error } = this.state;
     if (socketStatus === null) {
@@ -596,7 +644,13 @@ class PostGraphiQL extends React.PureComponent {
       return <GraphiQL {...sharedProps} />;
     } else {
       return (
-        <div className="postgraphiql-container graphiql-container">
+        <div
+          className={`postgraphiql-container graphiql-container ${
+            this.state.explain && this.state.explainResult && this.state.explainResult.length
+              ? 'explain-mode'
+              : ''
+          }`}
+        >
           <GraphiQLExplorer
             schema={schema}
             query={this.state.query}
@@ -647,33 +701,77 @@ class PostGraphiQL extends React.PureComponent {
                 title="Construct a query with the GraphiQL explorer"
                 onClick={this.handleToggleExplorer}
               />
+              {POSTGRAPHILE_CONFIG.allowExplain ? (
+                <GraphiQL.Button
+                  label={this.state.explain ? 'Explain ON' : 'Explain disabled'}
+                  title="View the SQL statements that this query invokes"
+                  onClick={this.handleToggleExplain}
+                />
+              ) : null}
             </GraphiQL.Toolbar>
             <GraphiQL.Footer>
               <div className="postgraphile-footer">
-                PostGraphile:{' '}
-                <a
-                  title="Open PostGraphile documentation"
-                  href="https://graphile.org/postgraphile/introduction/"
-                  target="new"
-                >
-                  Documentation
-                </a>{' '}
-                |{' '}
-                <a
-                  title="Open PostGraphile documentation"
-                  href="https://graphile.org/postgraphile/examples/"
-                  target="new"
-                >
-                  Examples
-                </a>{' '}
-                |{' '}
-                <a
-                  title="PostGraphile is supported by the community, please sponsor ongoing development"
-                  href="https://graphile.org/sponsor/"
-                  target="new"
-                >
-                  Sponsor Development
-                </a>
+                {this.state.explainResult && this.state.explainResult.length ? (
+                  <div className="postgraphile-plan-footer">
+                    {this.state.explainResult.map(res => (
+                      <div>
+                        <h4>
+                          Result from SQL{' '}
+                          <a href="https://www.postgresql.org/docs/current/sql-explain.html">
+                            EXPLAIN
+                          </a>{' '}
+                          on executed query:
+                        </h4>
+                        <pre className="explain-plan">
+                          <code>{res.plan}</code>
+                        </pre>
+                        <h4>Executed SQL query:</h4>
+                        <pre className="explain-sql">
+                          <code>{formatSQL(res.query)}</code>
+                        </pre>
+                      </div>
+                    ))}
+                    <p>
+                      Having performance issues?{' '}
+                      <a href="https://www.graphile.org/support/">We can help with that!</a>
+                    </p>
+                    <hr />
+                  </div>
+                ) : null}
+                <div className="postgraphile-regular-footer">
+                  PostGraphile:{' '}
+                  <a
+                    title="Open PostGraphile documentation"
+                    href="https://graphile.org/postgraphile/introduction/"
+                    target="new"
+                  >
+                    Documentation
+                  </a>{' '}
+                  |{' '}
+                  <a
+                    title="Open PostGraphile documentation"
+                    href="https://graphile.org/postgraphile/examples/"
+                    target="new"
+                  >
+                    Examples
+                  </a>{' '}
+                  |{' '}
+                  <a
+                    title="PostGraphile is supported by the community, please sponsor ongoing development"
+                    href="https://graphile.org/sponsor/"
+                    target="new"
+                  >
+                    Sponsor
+                  </a>{' '}
+                  |{' '}
+                  <a
+                    title="Get support from the team behind PostGraphile"
+                    href="https://graphile.org/support/"
+                    target="new"
+                  >
+                    Support
+                  </a>
+                </div>
               </div>
             </GraphiQL.Footer>
           </GraphiQL>
@@ -681,6 +779,8 @@ class PostGraphiQL extends React.PureComponent {
             open={this.state.showHeaderEditor}
             value={this.state.headersText}
             valid={this.state.headersTextValid}
+            toggleSaveHeaders={this.handleToggleSaveHeaders}
+            saveHeaders={this.state.saveHeadersText}
             onChange={e =>
               this.setState(
                 {
@@ -688,6 +788,9 @@ class PostGraphiQL extends React.PureComponent {
                   headersTextValid: isValidJSON(e.target.value),
                 },
                 () => {
+                  if (this.state.headersTextValid && this.state.saveHeadersText) {
+                    this._storage.set(STORAGE_KEYS.HEADERS_TEXT, this.state.headersText);
+                  }
                   if (this.state.headersTextValid && this.subscriptionsClient) {
                     // Reconnect to websocket with new headers
                     this.subscriptionsClient.close(false, true);
@@ -706,7 +809,7 @@ class PostGraphiQL extends React.PureComponent {
   }
 }
 
-function EditHeaders({ children, open, value, onChange, valid }) {
+function EditHeaders({ children, open, value, onChange, valid, saveHeaders, toggleSaveHeaders }) {
   return (
     <div
       className="graphiql-container not-really"
@@ -723,6 +826,10 @@ function EditHeaders({ children, open, value, onChange, valid }) {
             <div className="doc-explorer-rhs">{children}</div>
           </div>
           <div className="doc-explorer-contents">
+            <label>
+              <input type="checkbox" checked={saveHeaders} onChange={toggleSaveHeaders} />
+              Persist headers
+            </label>
             <textarea
               value={value}
               onChange={onChange}

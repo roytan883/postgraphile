@@ -1,45 +1,49 @@
 # Sponsors
 
-These individuals and companies give back to PostGraphile by sponsoring its
-ongoing development. Find out [how you can become a
+These individuals and companies sponsor ongoing development of projects in
+the Graphile ecosystem. Find out [how you can become a
 sponsor](https://graphile.org/sponsor/).
 
 ## Featured
 
 - Chad Furman
-- Timescale
-- Point 72 Ventures
+- Storyscript
+- Postlight
 
 ## Leaders
 
 - Joe Dennis
-- DOMONDA
+- domonda
 - James Allain
-- Stagency
-- NodeSource
-- 8th Light
-- Nigel Taylor
 - Jack Dinker
+- Robert Claypool
+- Qwick
+- Nigel Taylor
+- DocIQ
+- Principia Mentis
+- Partners in School Innovation
+- OpenLaw NZ
+- Sterblue
+- HR-ON
+- Ian Stewart
+- Dovetail
+- Jacob Gillespie
 
 ## Supporters
 
-- Daniel Einspanger
-- Michael Tng
+- Daniel Einspanjer
 - Sam Levin
-- Matt Bretl (also a major community contributor!)
 - stlbucket
-- Michel Pelletier
-- Dan Lynch
-- James Rascoe
+- Matt Bretl
 - Chris Watland
-- James Cavanaugh
-- Mark Lipscombe
-- purge
-- Frank
 - Mark Rapoza
 - innovation.rocks
-- cybere
-- dwwoelfel
+- purge
+- Daniel Woelfel
 - Bjørn Michelsen
-- Storyscript
-- cj
+- Philipp Litzenberger
+- CJ
+- apoland
+- Cameron Ellis
+- Mansoor Razzaq
+- rcy

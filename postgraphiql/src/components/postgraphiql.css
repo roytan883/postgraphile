@@ -37,20 +37,57 @@
   margin: 0;
 }
 
+.resultWrap .result-window {
+  flex: 1 1 100%;
+}
+
+.explain-mode .resultWrap .footer {
+  flex: 1 1 100%;
+  position: relative;
+}
+
+.explain-mode .postgraphile-footer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: auto;
+  overflow-x: hidden;
+}
+
 .postgraphile-footer {
-  height: 30px;
   line-height: 30px;
-  overflow: hidden;
-  display: block;
   align-items: center;
   padding: 0 0 0 1rem;
   white-space: nowrap;
   text-overflow: ellipsis;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
 }
 .postgraphile-footer a {
   text-decoration: none;
   color: #3b5998;
 }
+.postgraphile-footer pre {
+  padding: 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.1em;
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.explain-plan,
+.explain-sql {
+  max-height: 8.8em; /* line-height is 1.1em */
+  overflow: auto;
+}
+.explain-plan {
+  max-height: 13.2em; /* line-height is 1.1em */
+}
+
 .resultWrap {
   width: 5rem;
 }

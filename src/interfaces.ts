@@ -7,6 +7,9 @@ import { Plugin, PostGraphileCoreOptions } from 'postgraphile-core';
 import jwt = require('jsonwebtoken');
 import { EventEmitter } from 'events';
 
+type PromiseOrDirect<T> = T | Promise<T>;
+type DirectOrCallback<Request, T> = T | ((req: Request) => PromiseOrDirect<T>);
+
 /**
  * A narrower type than `any` that won’t swallow errors from assumptions about
  * code.
@@ -26,11 +29,10 @@ import { EventEmitter } from 'events';
  */
 export type mixed = {} | string | number | boolean | undefined | null;
 
-export type Middleware = (
-  req: IncomingMessage,
-  res: ServerResponse,
-  next: (err?: Error) => void,
-) => void;
+export type Middleware<
+  Request extends IncomingMessage = IncomingMessage,
+  Response extends ServerResponse = ServerResponse
+> = (req: Request, res: Response, next: (err?: Error) => void) => void;
 
 // Please note that the comments for this type are turned into documentation
 // automatically. We try and specify the options in the same order as the CLI.
@@ -72,7 +74,7 @@ export interface PostGraphileOptions<
   // websocket connection in order to perform authentication. We current only
   // support express (not Koa) middlewares here.
   /* @middlewareOnly */
-  websocketMiddlewares?: Array<Middleware>;
+  websocketMiddlewares?: Array<Middleware<Request, Response>>;
   // The default Postgres role to use. If no role was provided in a provided
   // JWT token, this role will be used.
   pgDefaultRole?: string;
@@ -115,10 +117,12 @@ export interface PostGraphileOptions<
   // `json` (which causes the stack to become an array with elements for each
   // line of the stack). Recommended in development, not recommended in
   // production.
+  /* @middlewareOnly */
   showErrorStack?: boolean | 'json';
   // Extends the error response with additional details from the Postgres
   // error.  Can be any combination of `['hint', 'detail', 'errcode']`.
   // Default is `[]`.
+  /* @middlewareOnly */
   extendedErrors?: Array<string>;
   // Enables ability to modify errors before sending them down to the client.
   // Optionally can send down custom responses. If you use this then
@@ -141,9 +145,9 @@ export interface PostGraphileOptions<
   replaceAllPlugins?: Array<Plugin>;
   // An array of [Graphile Engine](/graphile-build/plugins/) schema plugins to skip.
   skipPlugins?: Array<Plugin>;
-  // A file path string. Reads cached values from local cache file to improve
-  // startup time (you may want to do this in production).
-  readCache?: string;
+  // A file path string or an object. Reads cached values to improve startup time
+  // (you may want to do this in production).
+  readCache?: string | object;
   // A file path string. Writes computed values to local cache file so startup
   // can be faster (do this during the build phase).
   writeCache?: string;
@@ -204,7 +208,8 @@ export interface PostGraphileOptions<
   // The secret for your JSON web tokens. This will be used to verify tokens in
   // the `Authorization` header, and signing JWT tokens you return in
   // procedures.
-  jwtSecret?: string;
+  jwtSecret?: jwt.Secret;
+  jwtPublicKey?: jwt.Secret | jwt.GetPublicKeyOrSecret;
   // Options with which to perform JWT verification - see
   // https://github.com/auth0/node-jsonwebtoken#jwtverifytoken-secretorpublickey-options-callback
   // If 'audience' property is unspecified, it will default to
@@ -212,6 +217,9 @@ export interface PostGraphileOptions<
   // null.
   /* @middlewareOnly */
   jwtVerifyOptions?: jwt.VerifyOptions;
+  // Options with which to perform JWT signing - see
+  // https://github.com/auth0/node-jsonwebtoken#jwtsignpayload-secretorprivatekey-options-callback
+  jwtSignOptions?: jwt.SignOptions;
   // An array of (strings) path components that make up the path in the jwt from which to extract the postgres role.
   // By default, the role is extracted from `token.role`, so the default value is `['role']`.
   // e.g. `{ iat: 123456789, creds: { local: { role: "my_role" } } }`
@@ -246,7 +254,14 @@ export interface PostGraphileOptions<
   // Promise to the same) based on the incoming web request (e.g. to extract
   // session data).
   /* @middlewareOnly */
-  pgSettings?: { [key: string]: mixed } | ((req: Request) => Promise<{ [key: string]: mixed }>);
+  pgSettings?: DirectOrCallback<Request, { [key: string]: mixed }>;
+  // [Experimental] Determines if the 'Explain' feature in GraphiQL can be used
+  // to show the user the SQL statements that were executed. Set to a boolean to
+  // enable all users to use this, or to a function that filters each request to
+  // determine if the request may use Explain. DO NOT USE IN PRODUCTION unless
+  // you're comfortable with the security repurcussions of doing so.
+  /* @middlewareOnly */
+  allowExplain?: DirectOrCallback<Request, boolean>;
   // Some Graphile Engine schema plugins may need additional information
   // available on the `context` argument to the resolver - you can use this
   // function to provide such information based on the incoming request - you
@@ -330,13 +345,14 @@ export interface HttpRequestHandler<
 export interface WithPostGraphileContextOptions {
   pgPool: Pool;
   jwtToken?: string;
-  jwtSecret?: string;
-  jwtPublicKey?: string;
+  jwtSecret?: jwt.Secret;
+  jwtPublicKey?: jwt.Secret | jwt.GetPublicKeyOrSecret;
   jwtAudiences?: Array<string>;
   jwtRole?: Array<string>;
   jwtVerifyOptions?: jwt.VerifyOptions;
   pgDefaultRole?: string;
   pgSettings?: { [key: string]: mixed };
+  explain?: boolean;
   queryDocumentAst?: DocumentNode;
   operationName?: string;
   pgForceTransaction?: boolean;

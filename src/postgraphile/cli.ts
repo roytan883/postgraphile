@@ -16,6 +16,7 @@ import program = require('commander');
 import jwt = require('jsonwebtoken');
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import postgraphile, { getPostgraphileSchemaBuilder } from './postgraphile';
+import { makePgSmartTagsFromFilePlugin } from '../plugins';
 import { Pool, PoolConfig } from 'pg';
 import cluster = require('cluster');
 import { makePluginHook, PostGraphilePlugin } from './pluginHook';
@@ -24,11 +25,18 @@ import { mixed } from '../interfaces';
 import * as manifest from '../../package.json';
 import sponsors = require('../../sponsors.json');
 import { enhanceHttpServerWithSubscriptions } from './http/subscriptions';
+import { existsSync } from 'fs';
+
+const tagsFile = process.cwd() + '/postgraphile.tags.json5';
+/*
+ * Watch mode on the tags file is non-trivial, so only load the plugin if the
+ * file exists when PostGraphile starts.
+ */
+const smartTagsPlugin = existsSync(tagsFile) ? makePgSmartTagsFromFilePlugin() : null;
 
 const isDev = process.env.POSTGRAPHILE_ENV === 'development';
 
-// tslint:disable-next-line no-any
-function isString(str: any): str is string {
+function isString(str: unknown): str is string {
   return typeof str === 'string';
 }
 
@@ -99,7 +107,7 @@ program
   )
   .option(
     '-c, --connection <string>',
-    "the PostgreSQL database name or connection string. If omitted, inferred from environmental variables (see https://www.postgresql.org/docs/current/static/libpq-envars.html). Examples: 'db', 'postgres:///db', 'postgres://user:password@domain:port/db?ssl=1'",
+    "the PostgreSQL database name or connection string. If omitted, inferred from environmental variables (see https://www.postgresql.org/docs/current/static/libpq-envars.html). Examples: 'db', 'postgres:///db', 'postgres://user:password@domain:port/db?ssl=true'",
   )
   .option(
     '-C, --owner-connection <string>',
@@ -156,7 +164,7 @@ program
     'disable default mutations, mutation will only be possible through Postgres functions',
   )
   .option(
-    '--simple-collections [omit|both|only]',
+    '--simple-collections <omit|both|only>',
     '"omit" (default) - relay connections only, "only" - simple collections only (no Relay connections), "both" - both',
   )
   .option(
@@ -177,7 +185,7 @@ pluginHook('cli:flags:add:schema', addFlag);
 // Error enhancements
 program
   .option(
-    '--show-error-stack',
+    '--show-error-stack [json|string]',
     'show JavaScript error stacks in the GraphQL result errors (recommended in development)',
   )
   .option(
@@ -270,7 +278,11 @@ program
     '--enable-query-batching',
     '[experimental] enable the server to process multiple GraphQL queries in one request',
   )
-  .option('--disable-query-log', 'disable logging queries to console (recommended in production)');
+  .option('--disable-query-log', 'disable logging queries to console (recommended in production)')
+  .option(
+    '--allow-explain',
+    '[EXPERIMENTAL] allows users to use the Explain button in GraphiQL to view the plan for the SQL that is executed (DO NOT USE IN PRODUCTION)',
+  );
 
 pluginHook('cli:flags:add:webserver', addFlag);
 
@@ -373,8 +385,23 @@ Get started:
 
 program.parse(argvSansPlugins);
 
+function exitWithErrorMessage(message: string): never {
+  console.error(message);
+  console.error();
+  console.error('For help, run `postgraphile --help`');
+  process.exit(1);
+}
+
+if (program.args.length) {
+  exitWithErrorMessage(
+    `ERROR: some of the parameters you passed could not be processed: '${program.args.join(
+      "', '",
+    )}'`,
+  );
+}
+
 if (program['plugins']) {
-  throw new Error(`--plugins must be the first argument to postgraphile if specified`);
+  exitWithErrorMessage(`--plugins must be the first argument to postgraphile if specified`);
 }
 
 // Kill server on exit.
@@ -440,7 +467,7 @@ const {
   exportSchemaJson: exportJsonSchemaPath,
   exportSchemaGraphql: exportGqlSchemaPath,
   sortExport = false,
-  showErrorStack,
+  showErrorStack: rawShowErrorStack,
   extendedErrors = [],
   bodySizeLimit,
   appendPlugins: appendPluginNames,
@@ -456,15 +483,38 @@ const {
   setofFunctionsContainNulls = true,
   legacyJsonUuid,
   disableQueryLog,
+  allowExplain,
   simpleCollections,
   legacyFunctionsOnly,
   ignoreIndexes,
   // tslint:disable-next-line no-any
 } = { ...config['options'], ...program, ...overridesFromOptions } as typeof program;
 
+const showErrorStack = (val => {
+  switch (val) {
+    case 'string':
+    case true:
+      return true;
+    case null:
+    case undefined:
+      return undefined;
+    case 'json':
+      return 'json';
+    default: {
+      exitWithErrorMessage(
+        `Invalid argument for '--show-error-stack' - expected no argument, or 'string' or 'json'`,
+      );
+    }
+  }
+})(rawShowErrorStack);
+
+if (allowExplain && !disableGraphiql && !enhanceGraphiql) {
+  exitWithErrorMessage('`--allow-explain` requires `--enhance-graphiql` or `--disable-graphiql`');
+}
+
 let legacyRelations: 'omit' | 'deprecated' | 'only';
 if (!['omit', 'only', 'deprecated'].includes(rawLegacyRelations)) {
-  throw new Error(
+  exitWithErrorMessage(
     `Invalid argument to '--legacy-relations' - expected on of 'omit', 'deprecated', 'only'; but received '${rawLegacyRelations}'`,
   );
 } else {
@@ -553,7 +603,9 @@ const loadPlugins = (rawNames: mixed) => {
 };
 
 if (jwtAudiences != null && jwtVerifyAudience != null) {
-  throw new Error(`Provide either '--jwt-audiences' or '-A, --jwt-verify-audience' but not both`);
+  exitWithErrorMessage(
+    `Provide either '--jwt-audiences' or '-A, --jwt-verify-audience' but not both`,
+  );
 }
 
 function trimNulls(obj: object): object {
@@ -576,7 +628,7 @@ if (
     jwtVerifyIssuer ||
     jwtVerifySubject)
 ) {
-  throw new Error(
+  exitWithErrorMessage(
     'You may not mix `jwtVerifyOptions` with the legacy `jwtVerify*` settings; please only provide `jwtVerifyOptions`.',
   );
 }
@@ -593,6 +645,10 @@ const jwtVerifyOptions: jwt.VerifyOptions = rawJwtVerifyOptions
       subject: jwtVerifySubject,
     });
 
+const appendPlugins = loadPlugins(appendPluginNames);
+const prependPlugins = loadPlugins(prependPluginNames);
+const skipPlugins = loadPlugins(skipPluginNames);
+
 // The options to pass through to the schema builder, or the middleware
 const postgraphileOptions = pluginHook(
   'cli:library:options',
@@ -608,7 +664,7 @@ const postgraphileOptions = pluginHook(
     graphiql: !disableGraphiql,
     enhanceGraphiql: enhanceGraphiql ? true : undefined,
     jwtPgTypeIdentifier: jwtPgTypeIdentifier || deprecatedJwtPgTypeIdentifier,
-    jwtSecret: jwtSecret || deprecatedJwtSecret,
+    jwtSecret: jwtSecret || deprecatedJwtSecret || process.env.JWT_SECRET,
     jwtPublicKey,
     jwtAudiences,
     jwtSignOptions,
@@ -622,14 +678,15 @@ const postgraphileOptions = pluginHook(
     showErrorStack,
     extendedErrors,
     disableQueryLog,
+    allowExplain: allowExplain ? true : undefined,
     enableCors,
     exportJsonSchemaPath,
     exportGqlSchemaPath,
     sortExport,
     bodySizeLimit,
-    appendPlugins: loadPlugins(appendPluginNames),
-    prependPlugins: loadPlugins(prependPluginNames),
-    skipPlugins: loadPlugins(skipPluginNames),
+    appendPlugins: smartTagsPlugin ? [smartTagsPlugin, ...(appendPlugins || [])] : appendPlugins,
+    prependPlugins,
+    skipPlugins,
     readCache,
     writeCache,
     legacyRelations,
